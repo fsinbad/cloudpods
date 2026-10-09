@@ -356,6 +356,7 @@ func (self *SBaremetalGuestDriver) RequestStartOnHost(ctx context.Context, guest
 	if params.Length() > 0 {
 		config.Add(params, "params")
 	}
+	log.Debugf("RequestStartOnHost config: %s", config.String())
 	headers := task.GetTaskRequestHeader()
 	url := fmt.Sprintf("/baremetals/%s/servers/%s/start", host.Id, guest.Id)
 	_, err := host.BaremetalSyncRequest(ctx, "POST", url, headers, config)
@@ -376,7 +377,8 @@ func (self *SBaremetalGuestDriver) RequestStopGuestForDelete(ctx context.Context
 		!guest.PendingDeleted &&
 		!overridePendingDelete &&
 		!purge {
-		return guest.StartGuestStopTask(ctx, task.GetUserCred(), 0, true, false, task.GetTaskId())
+		stopTimeout := 0
+		return guest.StartGuestStopTask(ctx, task.GetUserCred(), &stopTimeout, true, false, task.GetTaskId())
 	}
 	if host != nil && !host.GetEnabled() && !purge {
 		return errors.Errorf("fail to contact baremetal")
@@ -410,9 +412,13 @@ func (self *SBaremetalGuestDriver) StartGuestStopTask(guest *models.SGuest, ctx 
 }
 
 func (self *SBaremetalGuestDriver) RequestUndeployGuestOnHost(ctx context.Context, guest *models.SGuest, host *models.SHost, task taskman.ITask) error {
+	body := jsonutils.NewDict()
+	if host.IsImport && options.Options.BaremetalPrepareServerFakeDelete {
+		body.Set("purge", jsonutils.JSONTrue)
+	}
 	url := fmt.Sprintf("/baremetals/%s/servers/%s", host.Id, guest.Id)
 	headers := task.GetTaskRequestHeader()
-	_, err := host.BaremetalSyncRequest(ctx, "DELETE", url, headers, nil)
+	_, err := host.BaremetalSyncRequest(ctx, "DELETE", url, headers, body)
 	return err
 }
 
@@ -559,6 +565,9 @@ func (self *SBaremetalGuestDriver) RequestDeployGuestOnHost(ctx context.Context,
 		config.Set("on_finish", jsonutils.NewString("restart"))
 	} else if val == "deploy" && jsonutils.QueryBoolean(task.GetParams(), "restart", false) {
 		config.Set("on_finish", jsonutils.NewString("shutdown"))
+	}
+	if jsonutils.QueryBoolean(task.GetParams(), "fake_create_from_bm_import", false) {
+		config.Set("fake_create_from_bm_import", jsonutils.JSONTrue)
 	}
 
 	disableCache, err := self.IsDisableImageCache(guest)

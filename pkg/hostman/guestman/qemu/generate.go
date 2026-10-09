@@ -92,10 +92,14 @@ func generateSpiceOptions(port uint, spice *desc.SSpiceDesc) []string {
 	// intel-hda and codec hda-duplex
 	opts = append(opts, generatePCIDeviceOption(spice.IntelHDA.PCIDevice))
 	codec := spice.IntelHDA.Codec
-	opts = append(opts,
-		fmt.Sprintf("-device %s,id=%s,bus=%s.0,cad=%d",
-			codec.Type, codec.Id, spice.IntelHDA.Id, codec.Cad),
-	)
+	codecOpts := fmt.Sprintf("-device %s,id=%s,bus=%s.0,cad=%d", codec.Type, codec.Id, spice.IntelHDA.Id, codec.Cad)
+	if spice.IntelHDA.Audio != nil {
+		opts = append(opts,
+			fmt.Sprintf("-audiodev %s,id=%s", spice.IntelHDA.Audio.Type, spice.IntelHDA.Audio.Id),
+		)
+		codecOpts = fmt.Sprintf("%s,audiodev=%s", codecOpts, spice.IntelHDA.Audio.Id)
+	}
+	opts = append(opts, codecOpts)
 
 	// serial port
 	opts = append(opts, generatePCIDeviceOption(spice.VdagentSerial.PCIDevice))
@@ -273,7 +277,7 @@ func generateKickstartBootOptions(drvOpt QemuOptions, kickstartBoot *KickstartBo
 	return opts
 }
 
-func generateDisksOptions(drvOpt QemuOptions, disks []*desc.SGuestDisk, isEncrypt, isMaster bool, osName string) []string {
+func generateDisksOptions(drvOpt QemuOptions, disks []*desc.SGuestDisk, isEncrypt, isMaster bool, osName, machineType string) []string {
 	opts := make([]string, 0)
 	for _, disk := range disks {
 		if disk.Driver == api.DISK_DRIVER_VFIO {
@@ -285,7 +289,7 @@ func generateDisksOptions(drvOpt QemuOptions, disks []*desc.SGuestDisk, isEncryp
 		} else {
 			opts = append(opts, getDiskDriveOption(drvOpt, disk, isEncrypt))
 		}
-		opts = append(opts, getDiskDeviceOption(drvOpt, disk, osName))
+		opts = append(opts, getDiskDeviceOption(drvOpt, disk, osName, machineType))
 	}
 	return opts
 }
@@ -352,7 +356,7 @@ func isLocalStorage(disk *desc.SGuestDisk) bool {
 	}
 }
 
-func getDiskDeviceOption(optDrv QemuOptions, disk *desc.SGuestDisk, osName string) string {
+func getDiskDeviceOption(optDrv QemuOptions, disk *desc.SGuestDisk, osName, machineType string) string {
 	diskIndex := disk.Index
 	diskDriver := disk.Driver
 	numQueues := disk.NumQueues
@@ -379,7 +383,11 @@ func getDiskDeviceOption(optDrv QemuOptions, disk *desc.SGuestDisk, osName strin
 	} else if utils.IsInStringArray(diskDriver, []string{DISK_DRIVER_SCSI, DISK_DRIVER_PVSCSI}) {
 		opt += ",bus=scsi.0"
 	} else if diskDriver == DISK_DRIVER_IDE {
-		opt += fmt.Sprintf(",bus=ide.%d,unit=%d", diskIndex/2, diskIndex%2)
+		if machineType == api.VM_MACHINE_TYPE_Q35 {
+			opt += fmt.Sprintf(",bus=ide.%d,unit=%d", diskIndex, 0)
+		} else {
+			opt += fmt.Sprintf(",bus=ide.%d,unit=%d", diskIndex/2, diskIndex%2)
+		}
 	} else if diskDriver == DISK_DRIVER_SATA {
 		opt += fmt.Sprintf(",bus=ahci0.%d", diskIndex)
 	}
@@ -395,10 +403,16 @@ func getDiskDeviceOption(optDrv QemuOptions, disk *desc.SGuestDisk, osName strin
 	return optDrv.Device(opt)
 }
 
-func generateCdromOptions(optDrv QemuOptions, cdroms []*desc.SGuestCdrom) []string {
+func generateCdromOptions(optDrv QemuOptions, cdroms []*desc.SGuestCdrom, disks []*desc.SGuestDisk, machine string) []string {
 	opts := make([]string, 0)
+	ideDisksCnt := 0
+	for _, disk := range disks {
+		if disk.Driver == DISK_DRIVER_IDE {
+			ideDisksCnt += 1
+		}
+	}
 
-	for _, cdrom := range cdroms {
+	for idx, cdrom := range cdroms {
 		//cdromDriveId := cdrom
 		driveOpt := fmt.Sprintf("id=%s", cdrom.Id)
 		driveOpt += desc.OptionsToString(cdrom.DriveOptions)
@@ -409,9 +423,21 @@ func generateCdromOptions(optDrv QemuOptions, cdroms []*desc.SGuestCdrom) []stri
 		}
 
 		if cdrom.Ide != nil {
+			var devOpt string
 			opts = append(opts, optDrv.Drive(driveOpt))
-			devOpt := fmt.Sprintf("%s,drive=%s,bus=ide.1",
-				cdrom.Ide.DevType, cdrom.Id)
+			if machine == api.VM_MACHINE_TYPE_Q35 {
+				busNum := idx + ideDisksCnt
+				if busNum == 0 {
+					busNum = 1
+				}
+				devOpt = fmt.Sprintf("%s,drive=%s,bus=ide.%d",
+					cdrom.Ide.DevType, cdrom.Id, busNum)
+			} else {
+				devOpt = fmt.Sprintf("%s,drive=%s,bus=ide.1",
+					cdrom.Ide.DevType, cdrom.Id)
+
+			}
+
 			if len(cdromPath) > 0 {
 				if cdrom.BootIndex != nil && *cdrom.BootIndex >= 0 {
 					devOpt += fmt.Sprintf(",bootindex=%d", *cdrom.BootIndex)
@@ -667,11 +693,16 @@ func generatePvpanicDeviceOption(pvpanic *desc.SGuestPvpanic) string {
 	return fmt.Sprintf("-device pvpanic,id=%s,ioport=0x%x", pvpanic.Id, pvpanic.Ioport)
 }
 
-func generateTpmDevOptions(tpm *desc.SGuestTpm) []string {
+func generateTpmDevOptions(tpm *desc.SGuestTpm, arch Arch) []string {
 	opts := make([]string, 0)
 	opts = append(opts, chardevOption(tpm.TpmSock))
 	opts = append(opts, fmt.Sprintf("-tpmdev emulator,id=%s,chardev=%s", tpm.Id, tpm.TpmSock.Id))
-	opts = append(opts, fmt.Sprintf("-device tpm-tis,tpmdev=%s", tpm.Id))
+	// tpm-tis is ISA/LPC (x86). ARM/RISC-V virt uses the sysbus tpm-tis-device.
+	devModel := "tpm-tis"
+	if !arch.IsX86() {
+		devModel = "tpm-tis-device"
+	}
+	opts = append(opts, fmt.Sprintf("-device %s,tpmdev=%s", devModel, tpm.Id))
 	return opts
 }
 
@@ -875,10 +906,10 @@ func GenerateStartOptions(
 
 	// generate disk options
 	opts = append(opts, generateDisksOptions(
-		drvOpt, input.GuestDesc.Disks, isEncrypt, input.GuestDesc.IsMaster, input.OsName)...)
+		drvOpt, input.GuestDesc.Disks, isEncrypt, input.GuestDesc.IsMaster, input.OsName, input.GuestDesc.Machine)...)
 
 	// cdrom
-	opts = append(opts, generateCdromOptions(drvOpt, input.GuestDesc.Cdroms)...)
+	opts = append(opts, generateCdromOptions(drvOpt, input.GuestDesc.Cdroms, input.GuestDesc.Disks, input.GuestDesc.Machine)...)
 
 	//floppy
 	opts = append(opts, generateFloppyOptions(drvOpt, input.GuestDesc.Floppys)...)
@@ -947,7 +978,7 @@ func GenerateStartOptions(
 	}
 
 	if input.GuestDesc.Tpm != nil {
-		opts = append(opts, generateTpmDevOptions(input.GuestDesc.Tpm)...)
+		opts = append(opts, generateTpmDevOptions(input.GuestDesc.Tpm, input.QemuArch)...)
 	}
 
 	// move extra options to end of cmdline

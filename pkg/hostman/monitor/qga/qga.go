@@ -41,6 +41,8 @@ const (
 	QGA_EXEC_DEFAULT_WAIT_TIMEOUT   int = 300
 )
 
+const QgaReadTimeOutErr = errors.Error("qga read timeout")
+
 type QGACallback func([]byte)
 
 type QemuGuestAgent struct {
@@ -276,7 +278,7 @@ func (qga *QemuGuestAgent) execCmd(cmd *monitor.Command, expectResp bool, readTi
 				log.Errorf("failed close qga connection %s", err)
 			}
 		}
-		return nil, errors.Errorf("qga read timeout")
+		return nil, QgaReadTimeOutErr
 	case res = <-resChan:
 		break
 	}
@@ -302,6 +304,14 @@ func (qga *QemuGuestAgent) execCmd(cmd *monitor.Command, expectResp bool, readTi
 func (qga *QemuGuestAgent) GuestPing(timeout int) error {
 	cmd := &monitor.Command{
 		Execute: "guest-ping",
+	}
+	_, err := qga.execCmd(cmd, true, timeout)
+	return err
+}
+
+func (qga *QemuGuestAgent) GuestStop(timeout int) error {
+	cmd := &monitor.Command{
+		Execute: "guest-shutdown",
 	}
 	_, err := qga.execCmd(cmd, true, timeout)
 	return err
@@ -410,6 +420,9 @@ func (qga *QemuGuestAgent) QgaGuestGetFsInfo() ([]GuestFsInfo, error) {
 		Execute: "guest-get-fsinfo",
 	}
 	rawResFsInfo, err := qga.execCmd(cmdFsInfo, true, -1)
+	if err != nil {
+		return nil, errors.Wrap(err, "exec guest-get-fsinfo")
+	}
 	resFsInfo := make([]GuestFsInfo, 0)
 	err = json.Unmarshal(*rawResFsInfo, &resFsInfo)
 	if err != nil {
@@ -435,6 +448,9 @@ func (qga *QemuGuestAgent) QgaGuestGetOsInfo() (*GuestOsInfo, error) {
 		Execute: "guest-get-osinfo",
 	}
 	rawResOsInfo, err := qga.execCmd(cmdOsInfo, true, -1)
+	if err != nil {
+		return nil, errors.Wrap(err, "exec guest-get-osinfo")
+	}
 	resOsInfo := new(GuestOsInfo)
 	err = json.Unmarshal(*rawResOsInfo, resOsInfo)
 	if err != nil {

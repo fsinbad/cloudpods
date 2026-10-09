@@ -122,7 +122,7 @@ func storageIsVgExist(ctx context.Context, w http.ResponseWriter, r *http.Reques
 		hostutils.Response(ctx, w, httperrors.NewMissingParameterError("vg_name"))
 		return
 	}
-	if err := lvmutils.VgDisplay(vgName); err != nil {
+	if _, err := lvmutils.VgDisplay(vgName); err != nil {
 		log.Errorf("vg %s display failed %s", vgName, err)
 		hostutils.Response(ctx, w, httperrors.NewInternalServerError("%s", err.Error()))
 		return
@@ -483,14 +483,17 @@ func storageDeleteSnapshot(ctx context.Context, w http.ResponseWriter, r *http.R
 		hostutils.Response(ctx, w, httperrors.NewMissingParameterError("snapshot_id"))
 		return
 	}
-	// blockStream indicate snapshot<-disk
-	blockStream := jsonutils.QueryBoolean(body, "block_stream", false)
-	autoDeleted := jsonutils.QueryBoolean(body, "auto_deleted", false)
 
 	input := &storageman.SStorageDeleteSnapshot{
-		DiskId:      diskId,
-		BlockStream: blockStream,
-		SnapshotId:  snapshotId,
+		DiskId:     diskId,
+		SnapshotId: snapshotId,
+	}
+	if snapshotIds, err := body.GetArray("snapshot_ids"); err == nil {
+		for _, snapshotId := range snapshotIds {
+			if id, err := snapshotId.GetString(); err == nil {
+				input.SnapshotIds = append(input.SnapshotIds, id)
+			}
+		}
 	}
 
 	if body.Contains("encrypt_info") {
@@ -500,15 +503,6 @@ func storageDeleteSnapshot(ctx context.Context, w http.ResponseWriter, r *http.R
 			return
 		}
 		input.EncryptInfo = encryptInfo
-	}
-
-	if !blockStream && !autoDeleted {
-		convertSnapshot, err := body.GetString("convert_snapshot")
-		if err != nil {
-			hostutils.Response(ctx, w, httperrors.NewMissingParameterError("convert_snapshot"))
-			return
-		}
-		input.ConvertSnapshot = convertSnapshot
 	}
 
 	hostutils.DelayTask(ctx, storage.DeleteSnapshot, input)

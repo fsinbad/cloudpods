@@ -63,8 +63,10 @@ const (
 func initHandlers(app *appsrv.Application, isSlave bool) {
 	app_common.ExportOptionsHandler(app, &o.Options)
 
-	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/list", server.HandleSftpList)
-	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/download", server.HandleSftpDownload)
+	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/list", server.AuthenticateSftp(server.HandleSftpList))
+	app.AddHandler("GET", ApiPathPrefix+"sftp/<session-id>/download", server.AuthenticateSftp(server.HandleSftpDownload))
+	app.AddHandler("GET", ApiPathPrefix+"container/<container-id>/list", server.AuthenticateSftp(server.HandleContainerList))
+	app.AddHandler("GET", ApiPathPrefix+"container/<container-id>/download", server.AuthenticateSftp(server.HandleContainerDownload))
 
 	if !isSlave {
 		app.AddHandler("POST", ApiPathPrefix+"k8s/<podName>/shell", auth.Authenticate(handleK8sShell))
@@ -75,7 +77,8 @@ func initHandlers(app *appsrv.Application, isSlave bool) {
 		app.AddHandler("POST", ApiPathPrefix+"server/<id>", auth.Authenticate(handleServerRemoteConsole))
 		app.AddHandler("POST", ApiPathPrefix+"adb/<id>/shell", auth.Authenticate(handleAdbShell))
 		app.AddHandler("POST", ApiPathPrefix+"server-rdp/<id>", auth.Authenticate(handleServerRemoteRDPConsole))
-		app.AddHandler("POST", ApiPathPrefix+"sftp/<session-id>/upload", server.HandleSftpUpload)
+		app.AddHandler("POST", ApiPathPrefix+"sftp/<session-id>/upload", server.AuthenticateSftp(server.HandleSftpUpload))
+		app.AddHandler("POST", ApiPathPrefix+"container/<container-id>/upload", server.AuthenticateSftp(server.HandleContainerUpload))
 	}
 
 	for _, man := range []db.IModelManager{
@@ -93,6 +96,11 @@ func fetchK8sEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) (*
 		body, _ = body.Get("webconsole")
 	}
 
+	userCred := auth.FetchUserCredential(ctx, policy.FilterPolicyCredential)
+	if userCred == nil {
+		return nil, httperrors.NewUnauthorizedError("No token founded")
+	}
+
 	k8sReq := webconsole_api.SK8sRequest{}
 	err := body.Unmarshal(&k8sReq)
 	if err != nil {
@@ -106,10 +114,12 @@ func fetchK8sEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) (*
 		k8sReq.Namespace = "default"
 	}
 	podName := params["<podName>"]
-	adminSession := auth.GetAdminSession(ctx, o.Options.Region)
+	// use the user's own session instead of the admin session, so the RBAC
+	// policy and owner scope of the target cluster are enforced
+	session := auth.Client().NewSession(ctx, o.Options.Region, "", "internal", userCred)
 
 	data := jsonutils.NewDict()
-	ret, err := k8s.KubeClusters.GetSpecific(adminSession, k8sReq.Cluster, "kubeconfig", data)
+	ret, err := k8s.KubeClusters.GetSpecific(session, k8sReq.Cluster, "kubeconfig", data)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +135,7 @@ func fetchK8sEnv(ctx context.Context, w http.ResponseWriter, r *http.Request) (*
 	f.WriteString(conf)
 
 	return &command.K8sEnv{
-		Session:    adminSession,
+		Session:    session,
 		Cluster:    k8sReq.Cluster,
 		Namespace:  k8sReq.Namespace,
 		Pod:        podName,
@@ -252,8 +262,14 @@ func handleSshShell(ctx context.Context, w http.ResponseWriter, r *http.Request)
 			return
 		}
 	} else {
-		// directly ssh IP should be deprecated gradually
-		sshConnInfo.IP = idStr
+		// directly ssh IP: only allow ips belonging to hosts or servers
+		// accessible by the user, so the console can not be used to dial
+		// arbitrary internal addresses
+		err = session.ResolveSSHIPPortByIp(ctx, env.ClientSessin, idStr, sshConnInfo.Port, &sshConnInfo)
+		if err != nil {
+			httperrors.GeneralServerError(ctx, w, err)
+			return
+		}
 	}
 	s := session.NewSshSession(ctx, env.ClientSessin, sshConnInfo)
 	handleSshSession(ctx, s, w)

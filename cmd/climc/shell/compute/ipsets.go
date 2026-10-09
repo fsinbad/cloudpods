@@ -23,7 +23,9 @@ import (
 func init() {
 	cmd := shell.NewResourceCmd(&modules.IpSets)
 	cmd.List(&compute.IpSetListOptions{})
+	cmd.Show(&compute.IpSetIdOptions{})
 	cmd.Create(&compute.IpSetCreateOptions{})
 	cmd.Update(&compute.IpSetUpdateOptions{})
 	cmd.Delete(&compute.IpSetIdOptions{})
+	cmd.Perform("syncstatus", &compute.IpSetIdOptions{})
 }

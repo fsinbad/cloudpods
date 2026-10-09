@@ -20,6 +20,7 @@ import (
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db/taskman"
 	"yunion.io/x/onecloud/pkg/cloudcommon/notifyclient"
+	"yunion.io/x/onecloud/pkg/cloudcommon/policy"
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/llm/options"
 	llmutils "yunion.io/x/onecloud/pkg/llm/utils"
@@ -51,6 +52,23 @@ func GetLLMManager() *SLLMManager {
 	}
 	llmManager.SetVirtualObject(llmManager)
 	return llmManager
+}
+
+func requireLLMGetAllowed(ctx context.Context, userCred mcclient.TokenCredential, llm *SLLM) error {
+	return db.IsObjectRbacAllowed(ctx, llm, userCred, policy.PolicyActionGet)
+}
+
+// FetchAccessibleLLM fetches an LLM by id or name and requires get permission.
+func FetchAccessibleLLM(ctx context.Context, userCred mcclient.TokenCredential, idStr string) (*SLLM, error) {
+	llmObj, err := GetLLMManager().FetchByIdOrName(ctx, userCred, strings.TrimSpace(idStr))
+	if err != nil {
+		return nil, err
+	}
+	llm := llmObj.(*SLLM)
+	if err := requireLLMGetAllowed(ctx, userCred, llm); err != nil {
+		return nil, err
+	}
+	return llm, nil
 }
 
 type SLLMManager struct {
@@ -551,15 +569,12 @@ func (llm *SLLM) SetStatus(ctx context.Context, userCred mcclient.TokenCredentia
 	if err := dep.SyncReadyReplicas(ctx, userCred); err != nil {
 		log.Warningf("SLLM.SetStatus: SyncReadyReplicas for deployment %s: %s", llm.LLMDeploymentId, err)
 	}
-	if dep.AutoRegisterAiproxy {
-		if status == api.LLM_STATUS_RUNNING {
-			if err := dep.StartAiproxySyncTask(ctx, userCred, llm.Id, ""); err != nil {
-				log.Warningf("SLLM.SetStatus: start aiproxy sync for llm %s: %v", llm.Id, err)
-			}
-		} else if oldStatus == api.LLM_STATUS_RUNNING && status != api.LLM_STATUS_RUNNING {
-			if err := UnsyncLlmInstance(ctx, userCred, dep, llm.Id); err != nil {
-				log.Warningf("SLLM.SetStatus: unsync aiproxy for llm %s: %v", llm.Id, err)
-			}
+	// Restart/stop must not delete aiproxy routing or providers; catalog is
+	// removed only on deployment delete or manual unregister. Reconcile on
+	// running upserts the same routing/provider IDs (e.g. new pod URL).
+	if dep.AutoRegisterAiproxy && status == api.LLM_STATUS_RUNNING {
+		if err := dep.StartAiproxySyncTask(ctx, userCred, llm.Id, ""); err != nil {
+			log.Warningf("SLLM.SetStatus: start aiproxy sync for llm %s: %v", llm.Id, err)
 		}
 	}
 	return nil
@@ -785,7 +800,7 @@ func (llm *SLLM) PerformStop(ctx context.Context, userCred mcclient.TokenCredent
 		return nil, errors.Wrapf(errors.ErrInvalidStatus, "llm id: %s status: %s", llm.Id, llm.Status)
 	}
 	llm.SetStatus(ctx, userCred, computeapi.VM_START_STOP, "perform stop")
-	err := llm.StartLLMStopTask(ctx, userCred, "")
+	err := llm.StartLLMStopTask(ctx, userCred, "", false)
 	if err != nil {
 		return nil, errors.Wrap(err, "StartStopTask")
 	}
@@ -793,6 +808,9 @@ func (llm *SLLM) PerformStop(ctx context.Context, userCred mcclient.TokenCredent
 }
 
 func (llm *SLLM) ValidateRestartInput(ctx context.Context, userCred mcclient.TokenCredential, input *api.LLMRestartInput) (*api.LLMRestartTaskInput, error) {
+	if input == nil {
+		input = &api.LLMRestartInput{}
+	}
 	if len(llm.CmpId) == 0 {
 		return nil, errors.Wrap(errors.ErrInvalidStatus, "empty cmp_id")
 	}
@@ -802,8 +820,10 @@ func (llm *SLLM) ValidateRestartInput(ctx context.Context, userCred mcclient.Tok
 		return nil, errors.Wrap(err, "GetServer")
 	}
 
-	if (llm.Status != api.LLM_STATUS_READY && llm.Status != api.LLM_STATUS_RUNNING) || (srv.Status != computeapi.VM_READY && !utils.IsInArray(srv.Status, computeapi.VM_RUNNING_STATUS)) {
-		return nil, errors.Wrapf(errors.ErrInvalidStatus, "invalid llm status %s", llm.Status)
+	if !input.Force {
+		if (llm.Status != api.LLM_STATUS_READY && llm.Status != api.LLM_STATUS_RUNNING) || (srv.Status != computeapi.VM_READY && !utils.IsInArray(srv.Status, computeapi.VM_RUNNING_STATUS)) {
+			return nil, errors.Wrapf(errors.ErrInvalidStatus, "invalid llm status %s", llm.Status)
+		}
 	}
 
 	sku, err := llm.GetLLMSku(llm.LLMSkuId)
@@ -813,6 +833,7 @@ func (llm *SLLM) ValidateRestartInput(ctx context.Context, userCred mcclient.Tok
 
 	return &api.LLMRestartTaskInput{
 		ImageId: sku.GetLLMImageId(),
+		Force:   input.Force,
 	}, nil
 }
 
@@ -889,8 +910,12 @@ func (llm *SLLM) NotifyRequest(ctx context.Context, userCred mcclient.TokenCrede
 	})
 }
 
-func (llm *SLLM) StartLLMStopTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string) error {
-	task, err := taskman.TaskManager.NewTask(ctx, "LLMStopTask", llm, userCred, nil, parentTaskId, "", nil)
+func (llm *SLLM) StartLLMStopTask(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string, force bool) error {
+	params := jsonutils.NewDict()
+	if force {
+		params.Set("force", jsonutils.JSONTrue)
+	}
+	task, err := taskman.TaskManager.NewTask(ctx, "LLMStopTask", llm, userCred, params, parentTaskId, "", nil)
 	if err != nil {
 		return errors.Wrap(err, "NewTask")
 	}

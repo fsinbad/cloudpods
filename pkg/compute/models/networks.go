@@ -691,6 +691,10 @@ func (manager *SNetworkManager) SyncNetworks(
 		}
 	}
 
+	if syncResult.AddCnt > 0 || syncResult.DelCnt > 0 || syncResult.UpdateCnt > 0 {
+		InvalidateNetworkUsableZoneIdsCache()
+	}
+
 	return localNets, remoteNets, syncResult
 }
 
@@ -850,8 +854,20 @@ func (manager *SNetworkManager) newFromCloudNetwork(ctx context.Context, userCre
 		Obj:    net,
 		Action: notifyclient.ActionSyncCreate,
 	})
+	if net.Status == api.NETWORK_STATUS_AVAILABLE {
+		net.TriggerPublicCloudSkuSync(ctx, userCred)
+	}
 
 	return net, nil
+}
+
+func (snet *SNetwork) TriggerPublicCloudSkuSync(ctx context.Context, userCred mcclient.TokenCredential) {
+	region, err := snet.GetRegion()
+	if err != nil {
+		log.Errorf("network %s(%s) get region for sku sync fail %s", snet.Name, snet.Id, err)
+		return
+	}
+	region.TriggerSkuSyncOnFirstNetwork(ctx, userCred)
 }
 
 func (net *SNetwork) IsAddressInRange(address netutils.IPV4Addr) bool {
@@ -904,7 +920,7 @@ func (snet *SNetwork) isAddress6Used(ctx context.Context, address string) (bool,
 
 func (manager *SNetworkManager) fetchAllOnpremiseNetworks(serverType string, isPublic tristate.TriState) ([]SNetwork, error) {
 	q := manager.Query()
-	wires := WireManager.Query().SubQuery()
+	wires := WireManager.Query().NotEquals("id", api.DEFAULT_HOST_LOCAL_WIRE_ID).SubQuery()
 	q = q.Join(wires, sqlchemy.Equals(q.Field("wire_id"), wires.Field("id")))
 	q = q.Filter(sqlchemy.Equals(wires.Field("vpc_id"), api.DEFAULT_VPC_ID))
 	if len(serverType) > 0 {
@@ -3577,6 +3593,7 @@ func (network *SNetwork) GetSchedtagJointManager() ISchedtagJointManager {
 }
 
 func (network *SNetwork) ClearSchedDescCache() error {
+	InvalidateNetworkUsableZoneIdsCache()
 	wire, _ := network.GetWire()
 	if wire == nil {
 		return nil
@@ -3819,7 +3836,11 @@ func (net *SNetwork) PerformStatus(ctx context.Context, userCred mcclient.TokenC
 	if !utils.IsInStringArray(input.Status, []string{api.NETWORK_STATUS_AVAILABLE, api.NETWORK_STATUS_UNAVAILABLE}) {
 		return nil, httperrors.NewInputParameterError("invalid status %s", input.Status)
 	}
-	return net.SSharableVirtualResourceBase.PerformStatus(ctx, userCred, query, input)
+	ret, err := net.SSharableVirtualResourceBase.PerformStatus(ctx, userCred, query, input)
+	if err == nil {
+		InvalidateNetworkUsableZoneIdsCache()
+	}
+	return ret, err
 }
 
 func (net *SNetwork) GetChangeOwnerCandidateDomainIds() []string {

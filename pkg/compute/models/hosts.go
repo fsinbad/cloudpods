@@ -26,6 +26,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"yunion.io/x/onecloud/pkg/compute/sshkeys"
 
 	"golang.org/x/sync/errgroup"
 	v1 "k8s.io/api/core/v1"
@@ -280,7 +281,11 @@ func (manager *SHostManager) ListItemFilter(
 	}
 
 	if len(query.AnyMac) > 0 {
-		anyMac := netutils.FormatMacAddr(query.AnyMac)
+		anyMacI, err := net.ParseMAC(query.AnyMac)
+		if err != nil {
+			return nil, errors.Wrapf(httperrors.ErrInputParameter, "invalid any_mac address %s: %s", query.AnyMac, err)
+		}
+		anyMac := anyMacI.String()
 		if len(anyMac) == 0 {
 			return nil, errors.Wrapf(httperrors.ErrInputParameter, "invalid any_mac address %s", query.AnyMac)
 		}
@@ -1443,17 +1448,35 @@ func (hh *SHostManager) GetPropertyK8sMasterNodeIps(ctx context.Context, userCre
 	if err != nil {
 		return nil, errors.Wrap(err, "list master nodes")
 	}
-	ips := make([]string, 0)
+	ips := map[string]struct{}{}
 	for i := range nodes.Items {
 		for j := range nodes.Items[i].Status.Addresses {
 			if nodes.Items[i].Status.Addresses[j].Type == v1.NodeInternalIP {
-				ips = append(ips, nodes.Items[i].Status.Addresses[j].Address)
+				ips[nodes.Items[i].Status.Addresses[j].Address] = struct{}{}
 			}
 		}
 	}
 	log.Infof("k8s master nodes ips %v", ips)
+	if jsonutils.QueryBoolean(query, "kvm_hosts", false) {
+		hostq := hh.Query("access_ip")
+		hostq = hostq.In("host_type", []string{api.HOST_TYPE_HYPERVISOR, api.HOST_TYPE_KVM, api.HOST_TYPE_CONTAINER})
+		type HostIp struct {
+			AccessIp string
+		}
+		hostIps := make([]HostIp, 0)
+		if err := hostq.All(&hostIps); err != nil && err != sql.ErrNoRows {
+			return nil, err
+		}
+		for i := range hostIps {
+			ips[hostIps[i].AccessIp] = struct{}{}
+		}
+	}
+	ipArr := make([]string, 0, len(ips))
+	for k := range ips {
+		ipArr = append(ipArr, k)
+	}
 	res := jsonutils.NewDict()
-	res.Set("ips", jsonutils.Marshal(ips))
+	res.Set("ips", jsonutils.Marshal(ipArr))
 	return res, nil
 }
 
@@ -1759,6 +1782,15 @@ func (cap *SStorageCapacity) toCapacityInfo() api.SStorageCapacityInfo {
 	info.CommitRate = cap.GetCommitRate()
 	info.FreeCapacity = cap.GetFree()
 	return info
+}
+
+func (hh *SHost) GetBmAttachedLocalStorageCapacity() SStorageCapacity {
+	ret := SStorageCapacity{}
+	storages := hh._getAttachedStorages(tristate.True, tristate.True, api.HOST_STORAGE_LOCAL_TYPES)
+	for _, s := range storages {
+		ret.Add(s.getStorageCapacity())
+	}
+	return ret
 }
 
 func (hh *SHost) GetAttachedLocalStorageCapacity() SStorageCapacity {
@@ -3307,6 +3339,23 @@ func (hh *SHost) SyncHostVMs(ctx context.Context, userCred mcclient.TokenCredent
 
 func (hh *SHost) getNetworkOfIPOnHost(ctx context.Context, ipAddr string) (*SNetwork, error) {
 	netInterfaces := hh.GetHostNetInterfaces()
+	// VMware: only associate networks under wires of the same manager_id
+	if hh.HostType == api.HOST_TYPE_ESXI {
+		if len(hh.ManagerId) == 0 {
+			return nil, fmt.Errorf("ESXi host %s has empty manager_id, cannot resolve network for IP %s", hh.Id, ipAddr)
+		}
+		for _, netInterface := range netInterfaces {
+			wire := netInterface.GetWire()
+			if wire == nil || wire.ManagerId != hh.ManagerId {
+				continue
+			}
+			network, err := netInterface.GetCandidateNetworkForIp(ctx, nil, nil, rbacscope.ScopeNone, ipAddr)
+			if err == nil && network != nil {
+				return network, nil
+			}
+		}
+		return nil, fmt.Errorf("IP %s not reachable on ESXi host %s under manager %s", ipAddr, hh.Id, hh.ManagerId)
+	}
 	for _, netInterface := range netInterfaces {
 		network, err := netInterface.GetCandidateNetworkForIp(ctx, nil, nil, rbacscope.ScopeNone, ipAddr)
 		if err == nil && network != nil {
@@ -5765,6 +5814,32 @@ func (hm *SHostManager) PerformValidateIpmi(ctx context.Context, userCred mcclie
 	return out, nil
 }
 
+func (hh *SHost) CreateFakeBaremetalServer(ctx context.Context, userCred mcclient.TokenCredential, serverName string, ownerId mcclient.IIdentityProvider) error {
+	guest := &SGuest{}
+	name, err := db.GenerateName(ctx, GuestManager, nil, serverName)
+	if err != nil {
+		return httperrors.NewInternalServerError("generate name failed %s", err)
+	}
+	guest.Name = name
+	guest.VmemSize = hh.MemSize
+	guest.VcpuCount = hh.CpuCount
+	guest.DisableDelete = tristate.True
+	guest.Hypervisor = api.HYPERVISOR_BAREMETAL
+	guest.HostId = hh.Id
+	guest.ProjectId = ownerId.GetProjectId()
+	guest.DomainId = ownerId.GetProjectDomainId()
+	guest.Status = api.VM_RUNNING
+	guest.PowerStates = api.VM_POWER_STATES_ON
+	guest.OsType = "Linux"
+	guest.SetModelManager(GuestManager, guest)
+	err = GuestManager.TableSpec().Insert(ctx, guest)
+	if err != nil {
+		return httperrors.NewInternalServerError("Guest create error: %s", err)
+	}
+
+	return guest.fixFakeServerCreateFromBmImport(ctx, userCred)
+}
+
 func (hh *SHost) PerformInitialize(
 	ctx context.Context, userCred mcclient.TokenCredential,
 	query jsonutils.JSONObject, data jsonutils.JSONObject,
@@ -5779,51 +5854,115 @@ func (hh *SHost) PerformInitialize(
 	if err != nil || hh.GetBaremetalServer() != nil {
 		return nil, nil
 	}
-	err = db.NewNameValidator(ctx, GuestManager, userCred, name, nil)
-	if err != nil {
-		return nil, err
+	if len(name) == 0 {
+		name = hh.Name + "-server"
 	}
 
 	if hh.IpmiInfo == nil || !hh.IpmiInfo.Contains("ip_addr") ||
 		!hh.IpmiInfo.Contains("password") {
 		return nil, httperrors.NewBadRequestError("IPMI infomation not configured")
 	}
-	guest := &SGuest{}
-	guest.Name = name
-	guest.VmemSize = hh.MemSize
-	guest.VcpuCount = hh.CpuCount
-	guest.DisableDelete = tristate.True
-	guest.Hypervisor = api.HYPERVISOR_BAREMETAL
-	guest.HostId = hh.Id
-	guest.ProjectId = userCred.GetProjectId()
-	guest.DomainId = userCred.GetProjectDomainId()
-	guest.Status = api.VM_RUNNING
-	guest.PowerStates = api.VM_POWER_STATES_ON
-	guest.OsType = "Linux"
-	guest.SetModelManager(GuestManager, guest)
-	err = GuestManager.TableSpec().Insert(ctx, guest)
-	if err != nil {
-		return nil, httperrors.NewInternalServerError("Guest Insert error: %s", err)
+	if err := hh.CreateFakeBaremetalServer(ctx, userCred, name, userCred); err != nil {
+		log.Errorf("CreateFakeBaremetalServer failed %s", err)
 	}
-	guest.SetAllMetadata(ctx, map[string]interface{}{
-		"is_fake_baremetal_server": true, "host_ip": hh.AccessIp}, userCred)
 
-	caps := hh.GetAttachedLocalStorageCapacity()
-	diskConfig := &api.DiskConfig{SizeMb: int(caps.GetFree())}
-	err = guest.CreateDisksOnHost(ctx, userCred, hh, []*api.DiskConfig{diskConfig}, nil, true, true, nil, nil, true)
-	if err != nil {
-		log.Errorf("Host perform initialize failed on create disk %s", err)
+	return nil, nil
+}
+
+func (hh *SHost) PerformCreateFromImportBaremetal(
+	ctx context.Context, userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject, data jsonutils.JSONObject,
+) (jsonutils.JSONObject, error) {
+	if !hh.IsImport {
+		return nil, httperrors.NewBadRequestError("Is not import host")
 	}
-	net, err := hh.getNetworkOfIPOnHost(ctx, hh.AccessIp)
+	ownerId, err := GuestManager.FetchOwnerId(ctx, data)
 	if err != nil {
-		log.Errorf("host perfrom initialize failed fetch net of access ip %s", err)
-	} else {
-		if options.Options.BaremetalServerReuseHostIp {
-			_, err = guest.attach2NetworkDesc(ctx, userCred, hh, &api.NetworkConfig{Network: net.Id}, nil, nil)
-			if err != nil {
-				log.Errorf("host perform initialize failed on attach network %s", err)
-			}
+		return nil, err
+	}
+	if ownerId == nil {
+		ownerId = userCred
+	}
+	name, err := data.GetString("name")
+	if err != nil {
+		return nil, httperrors.NewMissingParameterError("name")
+	}
+	if hh.GetBaremetalServer() != nil {
+		return nil, httperrors.NewInsufficientResourceError("host allocated")
+	}
+	if len(name) == 0 {
+		name = hh.Name + "-server"
+	}
+	if err := hh.CreateFakeBaremetalServer(ctx, userCred, name, ownerId); err != nil {
+		return nil, errors.Wrap(err, "CreateFakeBaremetalServer")
+	}
+	guest := hh.GetBaremetalServer()
+	if guest == nil {
+		return nil, errors.Errorf("failed get guest")
+	}
+	params := jsonutils.NewDict()
+	params.Set("restart", jsonutils.JSONTrue)
+	params.Set("fake_create_from_bm_import", jsonutils.JSONTrue)
+	return nil, guest.StartGuestDeployTask(ctx, userCred, params, "create", "")
+}
+
+func (hh *SHost) PerformAttachIsolatedDevices(
+	ctx context.Context, userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject, data jsonutils.JSONObject,
+) (jsonutils.JSONObject, error) {
+	if hh.HostType != api.HOST_TYPE_BAREMETAL {
+		return nil, httperrors.NewBadRequestError("Not support host type %s", hh.HostType)
+	}
+	guest := hh.GetBaremetalServer()
+	if guest == nil {
+		return nil, httperrors.NewBadRequestError("baremetal not created")
+	}
+	devs, err := hh.GetIsolateDevices()
+	if err != nil {
+		return nil, errors.Wrap(err, "GetIsolateDevices")
+	}
+	for i := range devs {
+		if devs[i].IsFull() {
+			continue
 		}
+		if err := guest.attachIsolatedDevice(ctx, userCred, &devs[i], nil, nil, nil, ""); err != nil {
+			return nil, errors.Wrap(err, "attachIsolatedDevice")
+		}
+	}
+	return nil, nil
+}
+
+func (hh *SHost) PerformBaremetalProbeIsolatedDevices(
+	ctx context.Context, userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject, data jsonutils.JSONObject,
+) (jsonutils.JSONObject, error) {
+	if hh.HostType != api.HOST_TYPE_BAREMETAL {
+		return nil, httperrors.NewBadRequestError("Not support host type %s", hh.HostType)
+	}
+	guest := hh.GetBaremetalServer()
+	if guest == nil {
+		return nil, httperrors.NewBadRequestError("baremetal not created")
+	}
+	username := "cloudroot"
+	accessIp := hh.AccessIp
+	private1, _, err := sshkeys.GetSshProjectKeypair(ctx, guest.ProjectId)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetSshProjectKeypair")
+	}
+	private, _, err := sshkeys.GetSshAdminKeypair(ctx)
+	if err != nil {
+		return nil, errors.Wrap(err, "GetSshAdminKeypair")
+	}
+	privateKyes := append(private, private1...)
+	params := jsonutils.NewDict()
+	params.Set("access_ip", jsonutils.NewString(accessIp))
+	params.Set("username", jsonutils.NewString(username))
+	params.Set("private_key", jsonutils.NewStringArray(privateKyes))
+	url := fmt.Sprintf("/baremetals/%s/probe-isolated-devices", hh.Id)
+	header := mcclient.GetTokenHeaders(userCred)
+	_, err = hh.BaremetalSyncRequest(ctx, "POST", url, header, params)
+	if err != nil {
+		return nil, errors.Wrap(err, "BaremetalSyncRequest")
 	}
 	return nil, nil
 }
@@ -7690,7 +7829,10 @@ func (hh *SHost) GetDetailsJnlp(ctx context.Context, userCred mcclient.TokenCred
 
 func (hh *SHost) PerformInsertIso(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	if utils.IsInStringArray(hh.Status, []string{api.BAREMETAL_READY, api.BAREMETAL_RUNNING}) {
-		imageStr, err := data.GetString("image")
+		imageStr, _ := data.GetString("image")
+		if len(imageStr) == 0 {
+			return nil, httperrors.NewInputParameterError("missing image")
+		}
 		image, err := CachedimageManager.getImageInfo(ctx, userCred, imageStr, false)
 		if err != nil {
 			if err == sql.ErrNoRows {

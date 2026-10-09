@@ -30,6 +30,7 @@ import (
 	_ "yunion.io/x/onecloud/pkg/baremetal/utils/raid/mvcli"
 	_ "yunion.io/x/onecloud/pkg/baremetal/utils/raid/sas2iru"
 	"yunion.io/x/onecloud/pkg/compute/baremetal"
+	"yunion.io/x/onecloud/pkg/httperrors"
 )
 
 func GetDriver(name string, term raid.IExecTerm) raid.IRaidDriver {
@@ -122,8 +123,13 @@ func buildRaid(driver raid.IRaidDriver, adapter raid.IRaidAdapter, confs []*api.
 
 	for _, conf := range confs {
 		selected, left, err = baremetal.RetrieveStorages(conf, left)
+		// RetrieveStorages also returns match diagnostics for leftover disks in rest;
+		// only treat it as failure when no disk was selected (same as CalculateLayout).
 		if len(selected) == 0 {
-			return errors.Wrapf(err, "no enough disks for config %#v", conf)
+			if err != nil {
+				return errors.Wrapf(err, "no enough disks for config %#v", conf)
+			}
+			return errors.Wrapf(httperrors.ErrInputParameter, "no enough disks for config %#v", conf)
 		}
 		var err error
 		switch conf.Conf {

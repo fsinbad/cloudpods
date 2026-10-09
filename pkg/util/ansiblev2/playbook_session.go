@@ -29,6 +29,8 @@ import (
 
 	"yunion.io/x/pkg/errors"
 	yerrors "yunion.io/x/pkg/util/errors"
+
+	"yunion.io/x/onecloud/pkg/util/fileutils2"
 )
 
 type IPlaybookSession interface {
@@ -145,7 +147,11 @@ func (r runnable) Run(ctx context.Context) (err error) {
 
 	// write out files
 	for name, content := range r.GetFiles() {
-		path := filepath.Join(tmpdir, name)
+		path, err2 := fileutils2.JoinInside(tmpdir, name)
+		if err2 != nil {
+			err = errors.Wrapf(err2, "playbook file %s", name)
+			return
+		}
 		dir := filepath.Dir(path)
 		err = os.MkdirAll(dir, os.FileMode(0700))
 		if err != nil {
@@ -256,7 +262,7 @@ func (r runnable) Run(ctx context.Context) (err error) {
 }
 
 type PlaybookSessionBase struct {
-	privateKey string
+	privateKeys []string
 
 	inventory    string
 	outputWriter io.Writer
@@ -274,8 +280,8 @@ func NewPlaybookSessionBase() PlaybookSessionBase {
 	}
 }
 
-func (pb *PlaybookSessionBase) GetPrivateKey() string {
-	return pb.privateKey
+func (pb *PlaybookSessionBase) GetPrivateKeys() []string {
+	return pb.privateKeys
 }
 
 func (pb *PlaybookSessionBase) IsKeepTmpdir() bool {

@@ -1650,6 +1650,9 @@ func (self *SManagedVirtualizationRegionDriver) RequestCreateElasticcache(ctx co
 		params.Tags, _ = ec.GetAllUserMetadata()
 
 		zone, err := ec.GetZone()
+		if err != nil {
+			return nil, errors.Wrapf(err, "GetZone")
+		}
 		if zone != nil {
 			izone, err := iRegion.GetIZoneById(zone.ExternalId)
 			if err != nil {
@@ -3244,7 +3247,11 @@ func (self *SManagedVirtualizationRegionDriver) RequestCreateKubeCluster(ctx con
 		opts.RoleName, _ = params.GetString("role_name")
 		opts.PrivateAccess, _ = params.Bool("private_access")
 		opts.PublicAccess, _ = params.Bool("public_access")
-		_, opts.PublicKey, _ = sshkeys.GetSshAdminKeypair(ctx)
+		_, pubKeys, err := sshkeys.GetSshAdminKeypair(ctx)
+		if err != nil {
+			return nil, errors.Wrapf(err, "GetSshAdminKeypair")
+		}
+		opts.PublicKey = pubKeys[0]
 
 		iregion, err := cluster.GetIRegion(ctx)
 		if err != nil {
@@ -3396,15 +3403,20 @@ func (self *SManagedVirtualizationRegionDriver) RequestCreateSecurityGroup(
 	}
 
 	for i := range rules {
-		opts := cloudprovider.SecurityGroupRuleCreateOptions{
-			Desc:      rules[i].Description,
-			Direction: secrules.TSecurityRuleDirection(rules[i].Direction),
-			Action:    secrules.TSecurityRuleAction(rules[i].Action),
-			Protocol:  rules[i].Protocol,
-			CIDR:      rules[i].CIDR,
-			Ports:     rules[i].Ports,
+		cidr, err := models.GetCloudSecgroupRuleCIDR(rules[i].TargetType, rules[i].CIDR)
+		if err != nil {
+			return errors.Wrapf(err, "GetCloudSecgroupRuleCIDR")
 		}
-		_, err := iGroup.CreateRule(&opts)
+		opts := cloudprovider.SecurityGroupRuleCreateOptions{
+			Desc:       rules[i].Description,
+			Direction:  secrules.TSecurityRuleDirection(rules[i].Direction),
+			Action:     secrules.TSecurityRuleAction(rules[i].Action),
+			Protocol:   rules[i].Protocol,
+			CIDR:       cidr,
+			TargetType: string(rules[i].TargetType),
+			Ports:      rules[i].Ports,
+		}
+		_, err = iGroup.CreateRule(&opts)
 		if err != nil {
 			return errors.Wrapf(err, "CreateRule")
 		}

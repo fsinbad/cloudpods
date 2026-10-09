@@ -31,6 +31,7 @@ import (
 	"yunion.io/x/onecloud/pkg/httperrors"
 	"yunion.io/x/onecloud/pkg/mcclient"
 	modules "yunion.io/x/onecloud/pkg/mcclient/modules/compute"
+	"yunion.io/x/onecloud/pkg/util/fileutils2"
 	"yunion.io/x/onecloud/pkg/util/procutils"
 )
 
@@ -59,6 +60,11 @@ func (d *sGuestRootFsDriver) DeployFiles(deploys []*deployapi.DeployContent) err
 		if len(deploy.Path) == 0 {
 			return fmt.Errorf("Deploy file missing param path")
 		}
+		clean, err := fileutils2.CleanGuestDeployPath(deploy.Path)
+		if err != nil {
+			return errors.Wrap(err, "deploy path")
+		}
+		deploy.Path = clean
 		dirname := filepath.Dir(deploy.Path)
 		if !d.GetPartition().Exists(dirname, caseInsensitive) {
 			modeRWXOwner := syscall.S_IRWXU | syscall.S_IRGRP | syscall.S_IXGRP | syscall.S_IROTH | syscall.S_IXOTH
@@ -157,6 +163,10 @@ func (r *sGuestRootFsDriver) DeployQgaService(part IDiskPartition) error {
 }
 
 func (l *sGuestRootFsDriver) MountProcfs() bool {
+	return false
+}
+
+func (l *sGuestRootFsDriver) IsWindowsVirtioNetSupport(IDiskPartition) bool {
 	return false
 }
 
@@ -267,18 +277,14 @@ func DeployAdminAuthorizedKeys(s *mcclient.ClientSession) error {
 		return errors.Wrapf(err, "mkdir .ssh %s", output)
 	}
 
-	query := jsonutils.NewDict()
-	query.Set("admin", jsonutils.JSONTrue)
-	ret, err := modules.Sshkeypairs.List(s, query)
+	keypairs, err := modules.Sshkeypairs.FetchAdminKeypairsBySession(s.GetContext(), s)
 	if err != nil {
 		return errors.Wrap(err, "modules.Sshkeypairs.List")
 	}
-	if len(ret.Data) == 0 {
+	if len(keypairs) == 0 {
 		return errors.Wrap(httperrors.ErrNotFound, "Not found admin sshkey")
 	}
-	keys := ret.Data[0]
-	adminPublicKey, _ := keys.GetString("public_key")
-	pubKeys := &deployapi.SSHKeys{AdminPublicKey: adminPublicKey}
+	pubKeys := &deployapi.SSHKeys{AdminPublicKey: keypairs[0].PublicKey}
 
 	var oldKeys string
 	authFile := path.Join(sshDir, "authorized_keys")

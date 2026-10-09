@@ -46,6 +46,9 @@ const (
 	CONTAINER_DEV_VASTAITECH_GPU   = "VASTAITECH_GPU"
 	CONTAINER_DEV_HYGON_DCU        = "HYGON_DCU"
 	CONTAINER_DEV_HYGON_DCU_HAMI   = "HYGON_DCU_HAMI"
+	CONTAINER_DEV_ILUVATAR_GPU     = "ILUVATAR_GPU"
+	CONTAINER_DEV_THEAD_PPU        = "THEAD_PPU"
+	CONTAINER_DEV_KUNLUNXIN_XPU    = "KUNLUNXIN_XPU"
 )
 
 var (
@@ -58,6 +61,9 @@ var (
 		CONTAINER_DEV_VASTAITECH_GPU,
 		CONTAINER_DEV_HYGON_DCU,
 		CONTAINER_DEV_HYGON_DCU_HAMI,
+		CONTAINER_DEV_ILUVATAR_GPU,
+		CONTAINER_DEV_THEAD_PPU,
+		CONTAINER_DEV_KUNLUNXIN_XPU,
 	}
 )
 
@@ -266,7 +272,7 @@ type ContainerCommitExternalRegistry struct {
 }
 
 type ContainerCommitInput struct {
-	// Container registry id from kubeserver
+	// Container registry id from glance (or kubeserver during migration)
 	RegistryId       string                           `json:"registry_id"`
 	ExternalRegistry *ContainerCommitExternalRegistry `json:"external_registry"`
 	// image name
@@ -288,10 +294,15 @@ type KubeServerContainerRegistryConfigHarbor struct {
 	KubeServerContainerRegistryConfigCommon
 }
 
+type KubeServerContainerRegistryConfigCustom struct {
+	KubeServerContainerRegistryConfigCommon
+}
+
 type KubeServerContainerRegistryConfig struct {
 	Type   string                                   `json:"type"`
 	Common *KubeServerContainerRegistryConfigCommon `json:"common"`
 	Harbor *KubeServerContainerRegistryConfigHarbor `json:"harbor"`
+	Custom *KubeServerContainerRegistryConfigCustom `json:"custom"`
 }
 
 type KubeServerContainerRegistryDetails struct {

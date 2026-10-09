@@ -932,6 +932,10 @@ func (self *SGuest) PerformDeploy(
 		input.ResetPassword = true
 	}
 
+	if err := ValidateDeployConfigs(input.DeployConfigs); err != nil {
+		return nil, err
+	}
+
 	driver, err := self.GetDriver()
 	if err != nil {
 		return nil, errors.Wrapf(err, "GetDriver")
@@ -1417,15 +1421,20 @@ func (self *SGuest) NotifyAdminServerEvent(ctx context.Context, event string, pr
 	notifyclient.SystemNotifyWithCtx(ctx, priority, event, kwargs)
 }
 
-func (self *SGuest) StartGuestStopTask(ctx context.Context, userCred mcclient.TokenCredential, timeoutSecs int, isForce, stopCharging bool, parentTaskId string) error {
+func (self *SGuest) StartGuestStopTask(ctx context.Context, userCred mcclient.TokenCredential, timeoutSecs *int, isForce, stopCharging bool, parentTaskId string) error {
 	if len(parentTaskId) == 0 {
 		self.SetStatus(ctx, userCred, api.VM_START_STOP, "")
 	}
 	params := jsonutils.NewDict()
+	timeout := options.Options.DefaultGuestStopTimeout
 	if isForce {
+		timeout = options.Options.DefaultGuestForceStopTimeout
 		params.Add(jsonutils.NewBool(isForce), "is_force")
+	}
+	if timeoutSecs != nil {
+		params.Add(jsonutils.NewInt(int64(*timeoutSecs)), "timeout")
 	} else {
-		params.Add(jsonutils.NewInt(int64(timeoutSecs)), "timeout")
+		params.Add(jsonutils.NewInt(int64(timeout)), "timeout")
 	}
 	params.Add(jsonutils.NewBool(stopCharging), "stop_charging")
 	if len(parentTaskId) > 0 {
@@ -1510,6 +1519,56 @@ func (self *SGuest) GetDetailsKickstart(ctx context.Context, userCred mcclient.T
 	return result, nil
 }
 
+func (self *SGuest) PerformSetIso(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input *api.ServerSetIsoInput) (jsonutils.JSONObject, error) {
+	if !utils.IsInStringArray(self.Hypervisor, []string{api.HYPERVISOR_KVM, api.HYPERVISOR_BAREMETAL}) {
+		return nil, httperrors.NewNotAcceptableError("Not allow for hypervisor %s", self.Hypervisor)
+	}
+	if !utils.IsInStringArray(self.Status, []string{api.VM_RUNNING, api.VM_READY}) {
+		return nil, httperrors.NewServerStatusError("Set ISO not allowed in status %s", self.Status)
+	}
+	if input.ImageId != "" {
+		isoImage, err := parseIsoInfo(ctx, userCred, input.ImageId)
+		if err != nil {
+			return nil, errors.Wrap(err, "parseIsoInfo")
+		}
+		input.ImageId = isoImage.Id
+	}
+
+	cdrom := self.getCdrom(false, input.CdromOrdinal)
+	if input.BootIndex != nil {
+		bd8 := *input.BootIndex
+		if cdrom == nil || cdrom.BootIndex != bd8 {
+			if isDup, err := self.isBootIndexDuplicated(bd8); err != nil {
+				return nil, err
+			} else if isDup {
+				return nil, httperrors.NewInputParameterError("boot index %d is duplicated", bd8)
+			}
+		}
+	}
+	srcImage := ""
+	if cdrom != nil {
+		srcImage = cdrom.ImageId
+	}
+	if srcImage == "" && input.ImageId == "" {
+		return nil, nil
+	} else if srcImage != "" && input.ImageId != "" {
+		if srcImage == input.ImageId {
+			return nil, nil
+		}
+		// eject && insert
+		err := self.StartEjectisoTask(ctx, input.CdromOrdinal, userCred, input.BootIndex, input.ImageId, "")
+		return nil, err
+	} else if srcImage == "" && input.ImageId != "" {
+		// insert only
+		err := self.StartInsertIsoTask(ctx, input.CdromOrdinal, input.ImageId, false, input.BootIndex, self.HostId, userCred, "")
+		return nil, err
+	} else {
+		// eject only
+		err := self.StartEjectisoTask(ctx, input.CdromOrdinal, userCred, nil, "", "")
+		return nil, err
+	}
+}
+
 // 挂载ISO镜像
 func (self *SGuest) PerformInsertiso(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	if !utils.IsInStringArray(self.Hypervisor, []string{api.HYPERVISOR_KVM, api.HYPERVISOR_BAREMETAL}) {
@@ -1564,16 +1623,23 @@ func (self *SGuest) PerformEjectiso(ctx context.Context, userCred mcclient.Token
 		return nil, httperrors.NewBadRequestError("No ISO to eject")
 	}
 	if utils.IsInStringArray(self.Status, []string{api.VM_RUNNING, api.VM_READY}) {
-		err := self.StartEjectisoTask(ctx, cdromOrdinal, userCred, "")
+		err := self.StartEjectisoTask(ctx, cdromOrdinal, userCred, nil, "", "")
 		return nil, err
 	} else {
 		return nil, httperrors.NewServerStatusError("Eject ISO not allowed in status %s", self.Status)
 	}
 }
 
-func (self *SGuest) StartEjectisoTask(ctx context.Context, cdromOrdinal int64, userCred mcclient.TokenCredential, parentTaskId string) error {
+func (self *SGuest) StartEjectisoTask(ctx context.Context, cdromOrdinal int64, userCred mcclient.TokenCredential, bootIndex *int8, newImageId, parentTaskId string) error {
 	data := jsonutils.NewDict()
 	data.Add(jsonutils.NewInt(cdromOrdinal), "cdrom_ordinal")
+	if newImageId != "" {
+		data.Add(jsonutils.NewString(newImageId), "new_image_id")
+		if bootIndex != nil {
+			data.Add(jsonutils.NewInt(int64(*bootIndex)), "boot_index")
+		}
+	}
+
 	task, err := taskman.TaskManager.NewTask(ctx, "GuestEjectISOTask", self, userCred, data, parentTaskId, "", nil)
 	if err != nil {
 		return err
@@ -1859,10 +1925,20 @@ func (self *SGuest) GuestNonSchedStartTask(
 }
 
 func (self *SGuest) StartGuestCreateTask(ctx context.Context, userCred mcclient.TokenCredential, input *api.ServerCreateInput, pendingUsage quotas.IQuota, parentTaskId string) error {
-	if input.FakeCreate {
-		self.fixFakeServerInfo(ctx, userCred)
+	if input.FakeCreate || input.FakeCreateFromBmImport {
+		self.fixFakeServerInfo(ctx, userCred, input.FakeCreateFromBmImport)
+		if input.FakeCreateFromBmImport {
+			if err := self.fixFakeServerCreateFromBmImport(ctx, userCred); err != nil {
+				return err
+			}
+			params := jsonutils.NewDict()
+			params.Set("restart", jsonutils.JSONTrue)
+			params.Set("fake_create_from_bm_import", jsonutils.JSONTrue)
+			return self.StartGuestDeployTask(ctx, userCred, params, "create", parentTaskId)
+		}
 		return nil
 	}
+
 	driver, err := self.GetDriver()
 	if err != nil {
 		return errors.Wrapf(err, "GetDriver")
@@ -1870,11 +1946,63 @@ func (self *SGuest) StartGuestCreateTask(ctx context.Context, userCred mcclient.
 	return driver.StartGuestCreateTask(self, ctx, userCred, input.JSON(input), pendingUsage, parentTaskId)
 }
 
-func (self *SGuest) fixFakeServerInfo(ctx context.Context, userCred mcclient.TokenCredential) {
+func (self *SGuest) fixFakeServerCreateFromBmImport(ctx context.Context, userCred mcclient.TokenCredential) error {
+	hh, err := self.GetHost()
+	if err != nil {
+		return errors.Wrap(err, "GetHost")
+	}
+
+	self.SetAllMetadata(ctx, map[string]interface{}{
+		"is_fake_baremetal_server": true, "host_ip": hh.AccessIp}, userCred)
+
+	caps := hh.GetBmAttachedLocalStorageCapacity()
+	diskConfig := &api.DiskConfig{SizeMb: int(caps.GetFree())}
+	err = self.CreateDisksOnHost(ctx, userCred, hh, []*api.DiskConfig{diskConfig}, nil, true, true, nil, nil, true)
+	if err != nil {
+		return errors.Wrap(err, "Host perform initialize failed on create disk")
+	}
+	disks, err := self.GetDisks()
+	if err != nil {
+		return errors.Wrap(err, "GetDisks")
+	}
+	for i := range disks {
+		if err := disks[i].SetStatus(ctx, userCred, api.DISK_READY, ""); err != nil {
+			return errors.Wrap(err, "disk set status")
+		}
+	}
+	net, err := hh.getNetworkOfIPOnHost(ctx, hh.AccessIp)
+	if err != nil {
+		return httperrors.NewInputParameterError("host perfrom initialize failed fetch net of access ip %s", err)
+	} else {
+		if options.Options.BaremetalServerReuseHostIp {
+			_, err = self.attach2NetworkDesc(ctx, userCred, hh, &api.NetworkConfig{Network: net.Id}, nil, nil)
+			if err != nil {
+				return httperrors.NewInternalServerError("host perform initialize failed on attach network %s", err)
+			}
+		}
+	}
+	devs, err := hh.GetIsolateDevices()
+	if err != nil {
+		return errors.Wrap(err, "GetIsolateDevices")
+	}
+	for i := range devs {
+		if err := self.attachIsolatedDevice(ctx, userCred, &devs[i], nil, nil, nil, ""); err != nil {
+			return errors.Wrap(err, "attachIsolatedDevice")
+		}
+	}
+
+	return nil
+}
+
+func (self *SGuest) fixFakeServerInfo(ctx context.Context, userCred mcclient.TokenCredential, fakeBmImportServer bool) {
 	status := []string{api.VM_READY, api.VM_RUNNING}
+
 	rand.Seed(time.Now().Unix())
 	db.Update(self, func() error {
 		self.Status = status[rand.Intn(len(status))]
+		if fakeBmImportServer {
+			self.Status = api.VM_READY
+		}
 		self.PowerStates = api.VM_POWER_STATES_ON
 		if self.Status == api.VM_READY {
 			self.PowerStates = api.VM_POWER_STATES_OFF
@@ -2424,12 +2552,11 @@ func (self *SGuest) DetachIsolatedDevices(ctx context.Context, userCred mcclient
 }
 
 // 卸载透传设备
-func (self *SGuest) PerformDetachIsolatedDevice(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+func (self *SGuest) PerformDetachIsolatedDevice(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input *api.ServerDetachIsolatedDeviceInput) (jsonutils.JSONObject, error) {
 	if self.Hypervisor != api.HYPERVISOR_KVM && self.Hypervisor != api.HYPERVISOR_POD {
 		return nil, httperrors.NewNotAcceptableError("Not allow for hypervisor %s", self.Hypervisor)
 	}
-	forceDetach := jsonutils.QueryBoolean(data, "is_force", false)
-	if !forceDetach {
+	if !input.IsForce {
 		if !utils.IsInStringArray(self.GetStatus(), []string{api.VM_READY, api.VM_RUNNING}) ||
 			(self.Hypervisor == api.HYPERVISOR_POD && self.GetStatus() != api.VM_READY) {
 			msg := fmt.Sprintf("Can't detach isolated device when guest is %s", self.GetStatus())
@@ -2444,46 +2571,49 @@ func (self *SGuest) PerformDetachIsolatedDevice(ctx context.Context, userCred mc
 		}
 	}
 
-	var detachAllDevice = jsonutils.QueryBoolean(data, "detach_all", false)
 	devs := make([]SGuestIsolatedDevice, 0)
-	if !detachAllDevice {
-		device, err := data.GetString("device")
-		if err != nil {
-			msg := "Missing isolated device"
-			logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
-			return nil, httperrors.NewBadRequestError("%s", msg)
+	if !input.DetachAll {
+		for i := range input.Devices {
+			device := input.Devices[i].Device
+			if input.Devices[i].Index == nil {
+				msg := "Missing isolated device index"
+				logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
+				return nil, httperrors.NewBadRequestError("%s", msg)
+			}
+			index := *input.Devices[i].Index
+			iDev, err := IsolatedDeviceManager.FetchByIdOrName(ctx, userCred, device)
+			if err != nil {
+				msgFmt := "Isolated device %s not found"
+				msg := fmt.Sprintf(msgFmt, device)
+				logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
+				return nil, httperrors.NewBadRequestError(msgFmt, device)
+			}
+			dev := iDev.(*SIsolatedDevice)
+			gdev, err := dev.GetGuestIsolatedDevice(self.Id, index)
+			if err != nil {
+				msg := err.Error()
+				logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
+				return nil, httperrors.NewBadRequestError("%s", msg)
+			}
+			devs = append(devs, *gdev)
 		}
-		index, err := data.Int("index")
-		if err != nil {
-			msg := "Missing isolated device index"
-			logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
-			return nil, httperrors.NewBadRequestError("%s", msg)
-		}
-		iDev, err := IsolatedDeviceManager.FetchByIdOrName(ctx, userCred, device)
-		if err != nil {
-			msgFmt := "Isolated device %s not found"
-			msg := fmt.Sprintf(msgFmt, device)
-			logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
-			return nil, httperrors.NewBadRequestError(msgFmt, device)
-		}
-		dev := iDev.(*SIsolatedDevice)
-		gdev, err := dev.GetGuestIsolatedDevice(self.Id, int(index))
+
+	} else {
+		var err error
+		devs, err = self.GetGuestIsolatedDevices()
 		if err != nil {
 			msg := err.Error()
 			logclient.AddActionLogWithContext(ctx, self, logclient.ACT_GUEST_DETACH_ISOLATED_DEVICE, msg, userCred, false)
 			return nil, httperrors.NewBadRequestError("%s", msg)
 		}
-		devs = append(devs, *gdev)
-	} else {
-		devs, _ = self.GetGuestIsolatedDevices()
 	}
 	if err := self.DetachIsolatedDevices(ctx, userCred, devs); err != nil {
 		return nil, err
 	}
-	if forceDetach {
+	if input.IsForce {
 		return nil, nil
 	}
-	return nil, self.StartIsolatedDevicesSyncTask(ctx, userCred, jsonutils.QueryBoolean(data, "auto_start", false), "")
+	return nil, self.StartIsolatedDevicesSyncTask(ctx, userCred, input.AutoStart, "")
 }
 
 func (self *SGuest) startDetachIsolateDeviceWithoutNic(ctx context.Context, userCred mcclient.TokenCredential, device string, index int) error {
@@ -2823,7 +2953,8 @@ func (self *SGuest) StartIsolatedDevicesSyncTask(ctx context.Context, userCred m
 	}
 }
 
-func (self *SGuest) findGuestnetworkByInfo(info api.ServerNetworkInfo) (*SGuestnetwork, error) {
+// FindGuestnetworkByInfo 根据 ip / ip6 / mac / index 定位虚机网卡
+func (self *SGuest) FindGuestnetworkByInfo(info api.ServerNetworkInfo) (*SGuestnetwork, error) {
 	if len(info.IpAddr) > 0 {
 		gn, err := self.GetGuestnetworkByIp(info.IpAddr)
 		if err != nil {
@@ -2894,9 +3025,9 @@ func (self *SGuest) PerformChangeIpaddr(
 
 	reserve := (input.Reserve != nil && *input.Reserve)
 
-	gn, err := self.findGuestnetworkByInfo(input.ServerNetworkInfo)
+	gn, err := self.FindGuestnetworkByInfo(input.ServerNetworkInfo)
 	if err != nil {
-		return nil, errors.Wrap(err, "findGuestnetworkByInfo")
+		return nil, errors.Wrap(err, "FindGuestnetworkByInfo")
 	}
 
 	var conf *api.NetworkConfig
@@ -3321,6 +3452,9 @@ func (self *SGuest) PerformAttachnetwork(
 		if err != nil {
 			return nil, err
 		}
+		if len(input.Nets[i].PortMappings) > 0 && !self.SupportPortMapping() {
+			return nil, httperrors.NewUnsupportOperationError("hypervisor %s does not support port_mapping", self.Hypervisor)
+		}
 		if IsExitNetworkInfo(ctx, userCred, input.Nets[i]) {
 			enicCnt += 1
 			// ebw = input.BwLimit
@@ -3466,9 +3600,9 @@ func (guest *SGuest) PerformChangeBandwidth(
 		return nil, httperrors.NewBadRequestError("Bandwidth, tx_bw_limit and rx_bw_limit must be non-negative")
 	}
 
-	guestnic, err := guest.findGuestnetworkByInfo(input.ServerNetworkInfo)
+	guestnic, err := guest.FindGuestnetworkByInfo(input.ServerNetworkInfo)
 	if err != nil {
-		return nil, errors.Wrap(err, "findGuestnetworkByInfo")
+		return nil, errors.Wrap(err, "FindGuestnetworkByInfo")
 	}
 
 	if guestnic.BwLimit != int(input.Bandwidth) || guestnic.TxBwLimit != int(input.TxBwLimit) || guestnic.RxBwLimit != int(input.RxBwLimit) {
@@ -3498,6 +3632,45 @@ func (guest *SGuest) PerformChangeBandwidth(
 		return nil, guest.StartSyncTask(ctx, userCred, false, "")
 	}
 	return nil, nil
+}
+
+// Set port mappings of a guest nic
+// 由独立的 GuestSetPortMappingTask 完成：先请求宿主机设置/分配 host_port，再同步配置到宿主机
+// 仅 kvm / pod 支持
+func (self *SGuest) PerformSetPortMapping(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	query jsonutils.JSONObject,
+	input api.ServerSetPortMappingInput,
+) (jsonutils.JSONObject, error) {
+	if !self.SupportPortMapping() {
+		return nil, httperrors.NewUnsupportOperationError("hypervisor %s does not support port_mapping", self.Hypervisor)
+	}
+	if !utils.IsInStringArray(self.Status, []string{api.VM_READY, api.VM_RUNNING}) {
+		return nil, httperrors.NewBadRequestError("Cannot set port mapping in status %s", self.Status)
+	}
+	for i := range input.PortMappings {
+		if err := validatePortMapping(input.PortMappings[i]); err != nil {
+			return nil, errors.Wrapf(err, "validate port mapping %s", jsonutils.Marshal(input.PortMappings[i]))
+		}
+	}
+	// 预先确认网卡存在，避免启动任务后才报错
+	if _, err := self.FindGuestnetworkByInfo(input.ServerNetworkInfo); err != nil {
+		return nil, errors.Wrap(err, "FindGuestnetworkByInfo")
+	}
+	return nil, self.StartGuestSetPortMappingTask(ctx, userCred, input)
+}
+
+func (self *SGuest) StartGuestSetPortMappingTask(ctx context.Context, userCred mcclient.TokenCredential, input api.ServerSetPortMappingInput) error {
+	// 先置进行中状态，让列表与操作入口立刻可见
+	if err := self.SetStatus(ctx, userCred, api.VM_SET_PORTMAPPING, "set port mappings"); err != nil {
+		return errors.Wrap(err, "SetStatus")
+	}
+	task, err := taskman.TaskManager.NewTask(ctx, "GuestSetPortMappingTask", self, userCred, jsonutils.Marshal(input).(*jsonutils.JSONDict), "", "")
+	if err != nil {
+		return errors.Wrap(err, "New GuestSetPortMappingTask")
+	}
+	return task.ScheduleRun(nil)
 }
 
 // 修改源地址检查
@@ -3732,6 +3905,21 @@ func (self *SGuest) DoCancelPendingDelete(ctx context.Context, userCred mcclient
 	}
 	for _, disk := range disks {
 		disk.DoCancelPendingDelete(ctx, userCred)
+	}
+
+	instanceSnapshots, err := self.GetInstanceSnapshots()
+	if err != nil {
+		return err
+	}
+	for i := range instanceSnapshots {
+		instanceSnapshots[i].DoCancelPendingDelete(ctx, userCred)
+	}
+	snapshots, err := self.GetDiskSnapshotsNotInInstanceSnapshots(true)
+	if err != nil {
+		return err
+	}
+	for i := range snapshots {
+		snapshots[i].DoCancelPendingDelete(ctx, userCred)
 	}
 
 	if self.BillingType == billing_api.BILLING_TYPE_POSTPAID && !self.ExpiredAt.IsZero() {
@@ -4069,14 +4257,13 @@ func (self *SGuest) StartGuestStopAndFreezeTask(ctx context.Context, userCred mc
 }
 
 // 重启
-func (self *SGuest) PerformRestart(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
-	isForce := jsonutils.QueryBoolean(data, "is_force", false)
-	if utils.IsInStringArray(self.Status, []string{api.VM_RUNNING, api.VM_STOP_FAILED, api.VM_KICKSTART_INSTALLING, api.VM_KICKSTART_FAILED, api.VM_KICKSTART_COMPLETED}) || (isForce && self.Status == api.VM_STOPPING) {
+func (self *SGuest) PerformRestart(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input api.ServerRestartInput) (jsonutils.JSONObject, error) {
+	if utils.IsInStringArray(self.Status, []string{api.VM_RUNNING, api.VM_STOP_FAILED, api.VM_KICKSTART_INSTALLING, api.VM_KICKSTART_FAILED, api.VM_KICKSTART_COMPLETED}) || (input.IsForce && self.Status == api.VM_STOPPING) {
 		driver, err := self.GetDriver()
 		if err != nil {
 			return nil, err
 		}
-		return nil, driver.StartGuestRestartTask(self, ctx, userCred, isForce, "")
+		return nil, driver.StartGuestRestartTask(self, ctx, userCred, input.IsForce, input.TimeoutSecs, "")
 	}
 	return nil, httperrors.NewInvalidStatusError("Cannot do restart server in status %s", self.Status)
 }
@@ -4947,15 +5134,18 @@ func (self *SGuest) PerformPostpaidExpire(ctx context.Context, userCred mcclient
 }
 
 // 续费
-func (self *SGuest) PerformRenew(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
-	durationStr, _ := data.GetString("duration")
-	if len(durationStr) == 0 {
-		return nil, httperrors.NewInputParameterError("missong duration")
+func (self *SGuest) PerformRenew(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.RenewInput) (jsonutils.JSONObject, error) {
+	if self.BillingType != billing_api.BILLING_TYPE_PREPAID {
+		return nil, httperrors.NewUnsupportOperationError("Only %s guest support renew operation", billing_api.BILLING_TYPE_PREPAID)
 	}
 
-	bc, err := billing.ParseBillingCycle(durationStr)
+	if len(input.Duration) == 0 {
+		return nil, httperrors.NewMissingParameterError("duration")
+	}
+
+	bc, err := billing.ParseBillingCycle(input.Duration)
 	if err != nil {
-		return nil, httperrors.NewInputParameterError("invalid duration %s: %s", durationStr, err)
+		return nil, httperrors.NewInputParameterError("invalid duration %s: %s", input.Duration, err)
 	}
 
 	driver, err := self.GetDriver()
@@ -4964,10 +5154,10 @@ func (self *SGuest) PerformRenew(ctx context.Context, userCred mcclient.TokenCre
 	}
 
 	if !driver.IsSupportedBillingCycle(bc) {
-		return nil, httperrors.NewInputParameterError("unsupported duration %s", durationStr)
+		return nil, httperrors.NewInputParameterError("unsupported duration %s", input.Duration)
 	}
 
-	err = self.startGuestRenewTask(ctx, userCred, durationStr, "")
+	err = self.startGuestRenewTask(ctx, userCred, input.Duration, "")
 	if err != nil {
 		return nil, err
 	}
@@ -6072,6 +6262,9 @@ func (self *SGuest) PerformSnapshotAndClone(
 	input.ServerCreateSnapshotParams = params
 	// set guest pending usage
 	pendingUsage, pendingRegionUsage, err := self.getGuestUsage(count)
+	if err != nil {
+		return nil, errors.Wrap(err, "getGuestUsage")
+	}
 	keys, err := self.GetQuotaKeys()
 	if err != nil {
 		quotas.CancelPendingUsage(ctx, userCred, snapshotUsage, snapshotUsage, false)
@@ -6196,8 +6389,12 @@ func (self *SGuest) GetDetailsJnlp(ctx context.Context, userCred mcclient.TokenC
 	return host.GetDetailsJnlp(ctx, userCred, query)
 }
 
-func (guest *SGuest) StartDeleteGuestSnapshots(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string) error {
-	task, err := taskman.TaskManager.NewTask(ctx, "GuestDeleteSnapshotsTask", guest, userCred, nil, parentTaskId, "", nil)
+func (guest *SGuest) StartDeleteGuestSnapshots(ctx context.Context, userCred mcclient.TokenCredential, parentTaskId string, deletePendingSnapshots bool) error {
+	data := jsonutils.NewDict()
+	if deletePendingSnapshots {
+		data.Add(jsonutils.JSONTrue, "delete_pending_snapshots")
+	}
+	task, err := taskman.TaskManager.NewTask(ctx, "GuestDeleteSnapshotsTask", guest, userCred, data, parentTaskId, "", nil)
 	if err != nil {
 		return err
 	}
@@ -7319,6 +7516,14 @@ func (self *SGuest) PerformEnableMemclean(ctx context.Context, userCred mcclient
 	return nil, self.SetMetadata(ctx, api.VM_METADATA_ENABLE_MEMCLEAN, "true", userCred)
 }
 
+func (self *SGuest) PerformSetQemuVersion(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
+	if data.Contains(api.VM_METADATA_QEMU_VERSION) {
+		qemuVersion, _ := data.GetString(api.VM_METADATA_QEMU_VERSION)
+		return nil, self.SetMetadata(ctx, api.VM_METADATA_QEMU_VERSION, qemuVersion, userCred)
+	}
+	return nil, self.SetMetadata(ctx, api.VM_METADATA_QEMU_VERSION, "", userCred)
+}
+
 func (self *SGuest) PerformSetTpm(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	enableTpm := jsonutils.QueryBoolean(data, api.VM_METADATA_ENABLE_TPM, false)
 	if enableTpm {
@@ -7496,7 +7701,7 @@ func (self *SGuest) PerformSetKickstart(ctx context.Context, userCred mcclient.T
 			return nil, errors.Wrap(err, "get driver for restart")
 		}
 
-		if err := driver.StartGuestRestartTask(self, ctx, userCred, false, "kickstart config updated"); err != nil {
+		if err := driver.StartGuestRestartTask(self, ctx, userCred, true, nil, "kickstart config updated"); err != nil {
 			return nil, errors.Wrap(err, "start restart task")
 		}
 
@@ -7542,7 +7747,7 @@ func (self *SGuest) PerformKickstartComplete(ctx context.Context, userCred mccli
 			if err != nil {
 				return nil, errors.Wrap(err, "get driver")
 			}
-			driver.StartGuestRestartTask(self, ctx, userCred, false, "")
+			driver.StartGuestRestartTask(self, ctx, userCred, true, nil, "")
 			return jsonutils.Marshal(map[string]string{
 				"status":  "success",
 				"message": "kickstart marked as completed, restarting VM",

@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -103,6 +104,9 @@ type SKVMInstanceRuntime struct {
 	StartupTask *SGuestResumeTask
 	MigrateTask *SGuestLiveMigrateTask
 
+	stopLock sync.Mutex
+	StopTask *SGuestStopTask
+
 	pciUninitialized bool
 	pciAddrs         *desc.SGuestPCIAddresses
 }
@@ -132,6 +136,19 @@ func NewKVMGuestInstance(id string, manager *SGuestManager) *SKVMGuestInstance {
 		sBaseGuestInstance: newBaseGuestInstance(id, manager, api.HYPERVISOR_KVM),
 		archMan:            arch.NewArch(qemuArch),
 	}
+}
+
+func (s *SKVMGuestInstance) SetStopTask(task *SGuestStopTask) {
+	s.stopLock.Lock()
+	defer s.stopLock.Unlock()
+
+	s.StopTask = task
+}
+
+func (s *SKVMGuestInstance) GetStopTask() *SGuestStopTask {
+	s.stopLock.Lock()
+	defer s.stopLock.Unlock()
+	return s.StopTask
 }
 
 // update guest runtime desc from source desc
@@ -1660,6 +1677,7 @@ func (s *SKVMGuestInstance) guestRun(ctx context.Context) {
 func (s *SKVMGuestInstance) onMonitorDisConnect(err error) {
 	log.Errorf("Guest %s on Monitor Disconnect reason: %v", s.Id, err)
 	s.CleanStartupTask()
+	s.detachStopTask()
 	s.scriptStop()
 	s.SyncStatus(fmt.Sprintf("monitor disconnect %v", err))
 	if s.guestAgent != nil {
@@ -1794,6 +1812,11 @@ func (s *SKVMGuestInstance) CleanStartupTask() {
 	} else {
 		log.Infof("[%s] Clean startup task ... no task", s.GetId())
 	}
+}
+
+func (s *SKVMGuestInstance) detachStopTask() {
+	log.Infof("[%s] detachStopTask", s.GetId())
+	s.SetStopTask(nil)
 }
 
 func (s *SKVMGuestInstance) onMonitorTimeout(ctx context.Context, err error) {
@@ -1980,6 +2003,9 @@ func (s *SKVMGuestInstance) HandleGuestStart(ctx context.Context, userCred mccli
 func (s *SKVMGuestInstance) StartGuest(ctx context.Context, userCred mcclient.TokenCredential, params *jsonutils.JSONDict) error {
 	var err error
 	params, err = s.prepareEncryptKeyForStart(ctx, userCred, params)
+	if qemuVersion, ok := s.Desc.Metadata["qemu_version"]; ok && !params.Contains("qemu_version") {
+		params.Set("qemu_version", jsonutils.NewString(qemuVersion))
+	}
 	if err != nil {
 		return errors.Wrap(err, "prepareEncryptKeyForStart")
 	}
@@ -1992,8 +2018,12 @@ func (s *SKVMGuestInstance) StartGuest(ctx context.Context, userCred mcclient.To
 	return nil
 }
 
-func (s *SKVMGuestInstance) HandleStop(ctx context.Context, timeout int64) error {
-	hostutils.DelayTaskWithoutReqctx(ctx, s.ExecStopTask, timeout)
+func (s *SKVMGuestInstance) HandleStop(ctx context.Context, timeout int64, isForce bool) error {
+	params := &SGuestStopParams{
+		IsForce: isForce,
+		Timeout: timeout,
+	}
+	hostutils.DelayTaskWithoutReqctx(ctx, s.ExecStopTask, params)
 	return nil
 }
 
@@ -2037,9 +2067,10 @@ func (s *SKVMGuestInstance) DeployFs(ctx context.Context, userCred mcclient.Toke
 		disk, e := storageman.GetManager().GetDiskByPath(diskPath)
 		if e != nil {
 			log.Errorf("failed get disk bypath %s %s", diskPath, e)
+			continue
 		}
 		if utils.IsInStringArray(disk.GetType(), []string{api.STORAGE_SLVM, api.STORAGE_CLVM}) {
-			if errDeactive := lvmutils.LVDeactivate(diskPath); err != nil {
+			if errDeactive := lvmutils.LVDeactivate(diskPath); errDeactive != nil {
 				log.Errorf("failed deactive disk %s: %s", diskPath, errDeactive)
 			}
 		}
@@ -2106,6 +2137,7 @@ func (s *SKVMGuestInstance) ForceStop() bool {
 
 func (s *SKVMGuestInstance) ExitCleanup(clear bool) {
 	s.cleanupKickstartMonitor()
+	s.detachStopTask()
 	if clear {
 		pid := s.GetPid()
 		if pid > 0 {
@@ -2336,11 +2368,21 @@ func (s *SKVMGuestInstance) forceScriptStop() bool {
 }
 
 func (s *SKVMGuestInstance) ExecStopTask(ctx context.Context, params interface{}) (jsonutils.JSONObject, error) {
-	timeout, ok := params.(int64)
+	input, ok := params.(*SGuestStopParams)
 	if !ok {
 		return nil, hostutils.ParamsError
 	}
-	NewGuestStopTask(s, ctx, timeout).Start()
+	s.stopLock.Lock()
+	defer s.stopLock.Unlock()
+	if s.StopTask != nil {
+		if !input.IsForce {
+			return nil, errors.Errorf("guest %s is stopping", s.GetId())
+		}
+		s.StopTask.StopNow(ctx)
+	} else {
+		s.StopTask = NewGuestStopTask(s, ctx, input.Timeout, input.IsForce)
+		go s.StopTask.Start()
+	}
 	return nil, nil
 }
 
@@ -3321,39 +3363,37 @@ func (s *SKVMGuestInstance) StaticSaveSnapshot(
 }
 
 func (s *SKVMGuestInstance) DeleteSnapshot(ctx context.Context, delParams *SDeleteDiskSnapshot) (jsonutils.JSONObject, error) {
-	if len(delParams.ConvertSnapshot) > 0 || delParams.BlockStream {
-		return s.ExecDeleteSnapshotTask(ctx, delParams.Disk, delParams.DeleteSnapshot,
-			delParams.ConvertSnapshot, delParams.BlockStream, delParams.EncryptInfo,
-			delParams.TotalDeleteSnapshotCount, delParams.DeletedSnapshotCount)
-	} else {
+	if !utils.IsInStringArray(delParams.Disk.GetType(), []string{api.STORAGE_LOCAL, api.STORAGE_LVM, api.STORAGE_SLVM}) {
 		res := jsonutils.NewDict()
 		res.Set("deleted", jsonutils.JSONTrue)
-		return res, delParams.Disk.DeleteSnapshot(delParams.DeleteSnapshot, "", false, delParams.EncryptInfo)
+		return res, delParams.Disk.DeleteSnapshot(delParams.DeleteSnapshot, delParams.SnapshotIds, delParams.EncryptInfo)
 	}
+	return s.ExecDeleteSnapshotTask(ctx, delParams.Disk, delParams.DeleteSnapshot, delParams.SnapshotIds, delParams.EncryptInfo,
+		delParams.TotalDeleteSnapshotCount, delParams.DeletedSnapshotCount)
 }
 
 func (s *SKVMGuestInstance) ExecDeleteSnapshotTask(
 	ctx context.Context, disk storageman.IDisk,
-	deleteSnapshot string, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo,
+	deleteSnapshot string, snapshotIds []string, encryptInfo apis.SEncryptInfo,
 	totalDeleteSnapshotCount, deletedSnapshotCount int,
 ) (jsonutils.JSONObject, error) {
 	if s.IsRunning() {
 		if s.isLiveSnapshotEnabled() {
-			task := NewGuestSnapshotDeleteTask(ctx, s, disk, deleteSnapshot, convertSnapshot, blockStream, encryptInfo)
+			task := NewGuestSnapshotDeleteTask(ctx, s, disk, deleteSnapshot, snapshotIds, encryptInfo)
 			task.Start(totalDeleteSnapshotCount, deletedSnapshotCount)
 			return nil, nil
 		} else {
 			return nil, fmt.Errorf("Guest dosen't support live snapshot delete")
 		}
 	} else {
-		return s.deleteStaticSnapshotFile(ctx, disk, deleteSnapshot, convertSnapshot, blockStream, encryptInfo)
+		return s.deleteStaticSnapshotFile(ctx, disk, deleteSnapshot, snapshotIds, encryptInfo)
 	}
 }
 
 func (s *SKVMGuestInstance) deleteStaticSnapshotFile(
-	ctx context.Context, disk storageman.IDisk, deleteSnapshot, convertSnapshot string, blockStream bool, encryptInfo apis.SEncryptInfo,
+	ctx context.Context, disk storageman.IDisk, deleteSnapshot string, snapshotIds []string, encryptInfo apis.SEncryptInfo,
 ) (jsonutils.JSONObject, error) {
-	if err := disk.DeleteSnapshot(deleteSnapshot, convertSnapshot, blockStream, encryptInfo); err != nil {
+	if err := disk.DeleteSnapshot(deleteSnapshot, snapshotIds, encryptInfo); err != nil {
 		log.Errorln(err)
 		return nil, err
 	}

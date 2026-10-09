@@ -91,7 +91,12 @@ func (self *SKVMRegionDriver) ValidateCreateSecurityGroupRuleInput(ctx context.C
 	switch input.TargetType {
 	case api.SecurityGroupRuleTargetTypeCidr:
 	case api.SecurityGroupRuleTargetTypeIpSet:
-		ipSet, err := validateIpSetId(ctx, userCred, input.CIDR)
+		secgroupObj, err := models.SecurityGroupManager.FetchById(input.SecgroupId)
+		if err != nil {
+			return nil, errors.Wrapf(err, "FetchById(%s)", input.SecgroupId)
+		}
+		secgroup := secgroupObj.(*models.SSecurityGroup)
+		ipSet, err := validateSecgroupIpSet(ctx, userCred, input.CIDR, secgroup.ManagerId, secgroup.CloudregionId, false)
 		if err != nil {
 			return nil, err
 		}
@@ -637,6 +642,12 @@ func (self *SKVMRegionDriver) ValidateCreateEipData(ctx context.Context, userCre
 }
 
 func (self *SKVMRegionDriver) ValidateSnapshotDelete(ctx context.Context, snapshot *models.SSnapshot) error {
+	if guest, _ := snapshot.GetGuest(); guest != nil {
+		if !utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_READY}) {
+			return httperrors.NewBadRequestError("can't delete snapshot in guest %s", guest.Status)
+		}
+	}
+
 	storage := snapshot.GetStorage()
 	if storage == nil {
 		return httperrors.NewInternalServerError("Kvm snapshot missing storage ??")
@@ -690,7 +701,7 @@ func (self *SKVMRegionDriver) RequestDeleteInstanceSnapshot(ctx context.Context,
 	deletedSnapshotCnt := deleteSnapshotTotalCnt - int64(len(snapshots))
 	params.Set("del_snapshot_id", jsonutils.NewString(snapshots[0].Id))
 	task.SetStage("OnKvmSnapshotDelete", params)
-	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), false, task.GetTaskId(), int(deleteSnapshotTotalCnt), int(deletedSnapshotCnt))
+	err = snapshots[0].StartSnapshotDeleteTask(ctx, task.GetUserCred(), task.GetTaskId(), int(deleteSnapshotTotalCnt), int(deletedSnapshotCnt))
 	if err != nil {
 		return err
 	}
@@ -866,7 +877,6 @@ func (self *SKVMRegionDriver) SnapshotIsOutOfChain(disk *models.SDisk) bool {
 func (self *SKVMRegionDriver) GetDiskResetParams(snapshot *models.SSnapshot) *jsonutils.JSONDict {
 	params := jsonutils.NewDict()
 	params.Set("snapshot_id", jsonutils.NewString(snapshot.Id))
-	params.Set("out_of_chain", jsonutils.NewBool(snapshot.OutOfChain))
 	params.Set("location", jsonutils.NewString(snapshot.Location))
 	if len(snapshot.BackingDiskId) > 0 {
 		params.Set("backing_disk_id", jsonutils.NewString(snapshot.BackingDiskId))
@@ -1636,10 +1646,103 @@ func validateIpSetId(ctx context.Context, userCred mcclient.TokenCredential, ipS
 		return nil, errors.Wrapf(err, "FetchByIdOrName")
 	}
 	ipSet := ipSetObj.(*models.SIpSet)
-	if !ipSet.IsSharable(userCred) {
+	if !ipSet.IsSharable(userCred) &&
+		!ipSet.IsOwner(userCred) &&
+		!db.IsDomainAllowGet(ctx, userCred, ipSet) &&
+		!db.IsAdminAllowGet(ctx, userCred, ipSet) {
 		return nil, errors.Wrapf(httperrors.ErrNotSufficientPrivilege, "ip set %s", ipSetId)
 	}
 	return ipSet, nil
+}
+
+func validateSecgroupIpSet(ctx context.Context, userCred mcclient.TokenCredential, ipSetId, managerId, cloudregionId string, requireExternal bool) (*models.SIpSet, error) {
+	ipSet, err := validateIpSetId(ctx, userCred, ipSetId)
+	if err != nil {
+		return nil, err
+	}
+	if len(managerId) > 0 && ipSet.ManagerId != managerId {
+		return nil, httperrors.NewInputParameterError("ip set %s and security group belong to different cloudproviders", ipSet.Name)
+	}
+	if len(managerId) == 0 && len(ipSet.ManagerId) > 0 {
+		return nil, httperrors.NewInputParameterError("ip set %s and security group belong to different cloudproviders", ipSet.Name)
+	}
+	if len(cloudregionId) > 0 && len(ipSet.CloudregionId) > 0 && ipSet.CloudregionId != cloudregionId {
+		return nil, httperrors.NewInputParameterError("ip set %s and security group belong to different cloudregions", ipSet.Name)
+	}
+	if requireExternal && len(ipSet.ExternalId) == 0 {
+		return nil, httperrors.NewInputParameterError("ip set %s has not been synchronized to cloud", ipSet.Name)
+	}
+	return ipSet, nil
+}
+
+func validateManagedSecgroupRuleCreateWithIpSet(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	input *api.SSecgroupRuleCreateInput,
+	baseValidate func(context.Context, mcclient.TokenCredential, *api.SSecgroupRuleCreateInput) (*api.SSecgroupRuleCreateInput, error),
+) (*api.SSecgroupRuleCreateInput, error) {
+	if len(input.TargetType) == 0 {
+		input.TargetType = api.SecurityGroupRuleTargetTypeCidr
+	}
+	switch input.TargetType {
+	case api.SecurityGroupRuleTargetTypeCidr:
+		return baseValidate(ctx, userCred, input)
+	case api.SecurityGroupRuleTargetTypeIpSet:
+		secgroupObj, err := models.SecurityGroupManager.FetchById(input.SecgroupId)
+		if err != nil {
+			return nil, errors.Wrapf(err, "FetchById(%s)", input.SecgroupId)
+		}
+		secgroup := secgroupObj.(*models.SSecurityGroup)
+		ipSet, err := validateSecgroupIpSet(ctx, userCred, input.CIDR, secgroup.ManagerId, secgroup.CloudregionId, true)
+		if err != nil {
+			return nil, err
+		}
+		input.CIDR = ""
+		input, err = baseValidate(ctx, userCred, input)
+		if err != nil {
+			return nil, err
+		}
+		input.CIDR = ipSet.Id
+		return input, nil
+	default:
+		return nil, httperrors.NewInputParameterError("unsupported target type %s", input.TargetType)
+	}
+}
+
+func validateManagedSecgroupRuleUpdateWithIpSet(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	input *api.SSecgroupRuleUpdateInput,
+	managerId, cloudregionId string,
+	baseValidate func(context.Context, mcclient.TokenCredential, *api.SSecgroupRuleUpdateInput) (*api.SSecgroupRuleUpdateInput, error),
+) (*api.SSecgroupRuleUpdateInput, error) {
+	if input.TargetType == api.SecurityGroupRuleTargetTypeIpSet {
+		if input.CIDR != nil && len(*input.CIDR) > 0 {
+			var ipSet *models.SIpSet
+			var err error
+			if len(managerId) > 0 {
+				ipSet, err = validateSecgroupIpSet(ctx, userCred, *input.CIDR, managerId, cloudregionId, true)
+			} else {
+				ipSet, err = validateIpSetId(ctx, userCred, *input.CIDR)
+				if err == nil && len(ipSet.ExternalId) == 0 {
+					err = httperrors.NewInputParameterError("ip set %s has not been synchronized to cloud", ipSet.Name)
+				}
+			}
+			if err != nil {
+				return nil, err
+			}
+			input.CIDR = &ipSet.Id
+		}
+		cidr := input.CIDR
+		input.CIDR = nil
+		input, err := baseValidate(ctx, userCred, input)
+		if err != nil {
+			return nil, err
+		}
+		input.CIDR = cidr
+		return input, nil
+	}
+	return baseValidate(ctx, userCred, input)
 }
 
 func (self *SKVMRegionDriver) ValidateUpdateSecurityGroupRuleInput(ctx context.Context, userCred mcclient.TokenCredential, input *api.SSecgroupRuleUpdateInput) (*api.SSecgroupRuleUpdateInput, error) {

@@ -48,7 +48,8 @@ type ComputeOptions struct {
 
 	PrepaidExpireCheck              bool `default:"false" help:"clean expired servers or disks"`
 	PrepaidDeleteExpireCheck        bool `default:"false" help:"check prepaid expired before delete"`
-	PrepaidExpireCheckSeconds       int  `default:"600" help:"How long to wait to scan expired prepaid VM or disks, default is 10 minutes"`
+	PrepaidExpireCheckSeconds       int  `default:"600" help:"How long to wait to scan expired postpaid resources, default is 10 minutes"`
+	PrepaidExpireDeleteMinutes      int  `default:"10" help:"Minutes after a prepaid server expires before auto delete, default is 10 minutes"`
 	ExpiredPrepaidMaxCleanBatchSize int  `default:"50" help:"How many expired prepaid servers can be deleted in a batch"`
 
 	PrepaidAutoRenew      bool `default:"true" help:"auto renew prepaid servers when server's auto_renew attr is true"`
@@ -98,10 +99,15 @@ type ComputeOptions struct {
 	DefaultDiskDriver    string `help:"default disk driver" choices:"scsi|virtio|ide" default:"scsi"`
 	DefaultDiskCacheMode string `help:"default kvm disk cache mode" choices:"writeback|none|writethrough" default:"none"`
 
+	DefaultGuestStopTimeout      int `help:"default guest stop timeout" default:"300"`
+	DefaultGuestForceStopTimeout int `help:"default guest force stop timeout" default:"30"`
+
 	SystemAdminQuotaCheck         bool `help:"Enable quota check for system admin, default False" default:"false"`
 	CloudaccountHealthStatusCheck bool `help:"Enable cloudaccount health status check, default True" default:"true"`
 
-	BaremetalPreparePackageUrl string `help:"Baremetal online register package"`
+	BaremetalPreparePackageUrl                  string `help:"Baremetal online register package"`
+	BaremetalPrepareServerFakeDelete            bool   `help:"Baremetal registed server fake delete" default:"false"`
+	BaremetalPrepareServerFakeDeleteKeepRunning bool   `help:"Baremetal registed server fake delete keep guest running" default:"true"`
 
 	// snapshot options
 	AutoSnapshotDay  int `default:"1" help:"Days auto snapshot disks, default 1 day"`
@@ -240,8 +246,6 @@ type ComputeOptions struct {
 	SkuMaxCpuCount int64 `help:"Sku max cpu count" default:"256"`
 
 	SaveCloudImageToGlance bool `help:"Auto save cloud vm image to glance" default:"true"`
-
-	ResourceExpiredNotifyDays []int `help:"The notify of resource expired" default:"1,3,30"`
 
 	SkipSyncHostConfigInfoProviders    string `help:"Skip sync host cpu and mem config by provider"`
 	SkipSyncStorageConfigInfoProviders string `help:"Skip sync storage capacity and media type config by provider"`

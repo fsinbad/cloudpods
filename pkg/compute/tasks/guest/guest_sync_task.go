@@ -28,6 +28,7 @@ import (
 	"yunion.io/x/onecloud/pkg/compute/models"
 	"yunion.io/x/onecloud/pkg/compute/options"
 	"yunion.io/x/onecloud/pkg/mcclient/auth"
+	"yunion.io/x/onecloud/pkg/mcclient/modules/apimap"
 	"yunion.io/x/onecloud/pkg/mcclient/modules/vpcagent"
 	"yunion.io/x/onecloud/pkg/util/logclient"
 )
@@ -80,10 +81,10 @@ func (self *GuestSyncConfTask) StartRestartNetworkTask(ctx context.Context, gues
 		log.Errorf("unable to get prev_mac when restart_network is true when sync guest")
 		return
 	}
-	ipMask, err := self.Params.GetString("ip_mask")
-	gateway, err := self.Params.GetString("gateway")
-	ip6Mask, err := self.Params.GetString("ip6_mask")
-	gateway6, err := self.Params.GetString("gateway6")
+	ipMask, _ := self.Params.GetString("ip_mask")
+	gateway, _ := self.Params.GetString("gateway")
+	ip6Mask, _ := self.Params.GetString("ip6_mask")
+	gateway6, _ := self.Params.GetString("gateway6")
 	if ipMask == "" && ip6Mask == "" {
 		log.Errorf("unable to get ip_mask when restart_network is true when sync guest")
 		return
@@ -117,12 +118,15 @@ func (self *GuestSyncConfTask) StartRestartNetworkTask(ctx context.Context, gues
 		}
 
 		if isVpcNetwork {
-			err = vpcagent.VpcAgent.DoSync(auth.GetAdminSession(ctx, options.Options.Region))
-			if err != nil {
-				log.Errorf("vpcagent.VpcAgent.DoSync fail %s", err)
+			session := auth.GetAdminSession(ctx, options.Options.Region)
+			if apimap.TriggerSyncAndWait(session).ShouldTriggerAgent() {
+				err = vpcagent.VpcAgent.DoSync(session)
+				if err != nil {
+					log.Errorf("vpcagent.VpcAgent.DoSync fail %s", err)
+				}
+				// wait for vpcagent sync network topo
+				time.Sleep(10 * time.Second)
 			}
-			// wait for vpcagent sync network topo
-			time.Sleep(10 * time.Second)
 		}
 		return guest.StartQgaRestartNetworkTask(ctx, self.UserCred, "", ifnameDevice, ipMask, gateway, ip6Mask, gateway6)
 	}()

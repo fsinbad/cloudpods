@@ -57,13 +57,15 @@ func (r *SAiKeyRouting) IsZero() bool {
 }
 
 type AiKeyListInput struct {
-	apis.EnabledStatusStandaloneResourceListInput
+	apis.VirtualResourceListInput
+	apis.EnabledResourceBaseListInput
 
 	AiProviderId string `json:"ai_provider_id"`
 }
 
 type AiKeyCreateInput struct {
-	apis.EnabledStatusStandaloneResourceCreateInput
+	apis.VirtualResourceCreateInput
+	apis.EnabledBaseResourceCreateInput
 
 	AiProviderId string         `json:"ai_provider_id"`
 	Secret       string         `json:"secret"`
@@ -72,7 +74,7 @@ type AiKeyCreateInput struct {
 }
 
 type AiKeyUpdateInput struct {
-	apis.EnabledStatusStandaloneResourceBaseUpdateInput
+	apis.VirtualResourceBaseUpdateInput
 
 	AiProviderId string         `json:"ai_provider_id"`
 	Secret       string         `json:"secret"`
@@ -82,10 +84,11 @@ type AiKeyUpdateInput struct {
 }
 
 type AiKeyDetails struct {
-	apis.EnabledStatusStandaloneResourceDetails
+	apis.VirtualResourceDetails
 
 	AiProviderId   string         `json:"ai_provider_id"`
 	AiProviderName string         `json:"ai_provider_name"`
+	Secret         string         `json:"secret"`
 	Weight         int            `json:"weight"`
 	Routing        *SAiKeyRouting `json:"routing"`
 }

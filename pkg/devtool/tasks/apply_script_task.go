@@ -89,8 +89,10 @@ func (self *ApplyScriptTask) taskSuccess(ctx context.Context, sa *models.SScript
 	err := sa.StopApply(self.UserCred, sar, true, "", "")
 	if err != nil {
 		log.Errorf("unable to StopApply script %s to server %s", sa.ScriptId, sa.GuestId)
-		self.SetStageComplete(ctx, nil)
+		self.SetStageFailed(ctx, jsonutils.NewString(err.Error()))
+		return
 	}
+	self.SetStageComplete(ctx, nil)
 }
 
 func (self *ApplyScriptTask) OnInit(ctx context.Context, obj db.IStandaloneModel, body jsonutils.JSONObject) {
@@ -159,10 +161,21 @@ func (self *ApplyScriptTask) OnInit(ctx context.Context, obj db.IStandaloneModel
 	taskHeader := self.GetTaskRequestHeader()
 	session.Header.Set(mcclient.TASK_NOTIFY_URL, taskHeader.Get(mcclient.TASK_NOTIFY_URL))
 	session.Header.Set(mcclient.TASK_ID, taskHeader.Get(mcclient.TASK_ID))
-	_, err = ansible_modules.AnsiblePlaybookReference.PerformAction(session, s.PlaybookReferenceId, "run", params)
+	ret, err := ansible_modules.AnsiblePlaybookReference.PerformAction(session, s.PlaybookReferenceId, "run", params)
 	if err != nil {
 		self.taskFailed(ctx, sa, sar, errors.Wrapf(err, "can't run ansible playbook reference %s", s.PlaybookReferenceId))
 		return
+	}
+	// Remember which ansible playbook instance ran the playbook: it holds the full
+	// ansible output that the ansible-log action of the record serves on demand.
+	if instanceId, _ := ret.GetString("ansible_playbook_instance_id"); len(instanceId) > 0 {
+		_, err = db.Update(sar, func() error {
+			sar.AnsiblePlaybookInstanceId = instanceId
+			return nil
+		})
+		if err != nil {
+			log.Errorf("unable to record ansible playbook instance %s on script apply record %s: %v", instanceId, sar.GetId(), err)
+		}
 	}
 }
 

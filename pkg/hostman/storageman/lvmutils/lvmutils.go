@@ -111,6 +111,15 @@ func LvIsActivated(lvPath string) (bool, error) {
 	return false, errors.Errorf("unexpect res %v", res)
 }
 
+func LvDisplay(lvPath string) (string, error) {
+	cmd := fmt.Sprintf("lvm lvdisplay %s", lvPath)
+	res, err := procutils.NewRemoteCommandAsFarAsPossible("bash", "-c", cmd).Output()
+	if err != nil {
+		return "", errors.Wrap(err, "lvm lvdisplay")
+	}
+	return string(res), nil
+}
+
 func LVActive(lvPath string, share, exclusive bool) error {
 	opts := "-ay"
 	if share {
@@ -281,12 +290,12 @@ $size1 $size2 linear $2 0" | dmsetup create $3
 	return nil
 }
 
-func VgDisplay(vgName string) error {
+func VgDisplay(vgName string) (string, error) {
 	out, err := procutils.NewRemoteCommandAsFarAsPossible("lvm", "vgdisplay", vgName).Output()
 	if err != nil {
-		return errors.Wrapf(err, "vgdisplay %s failed %s", vgName, out)
+		return "", errors.Wrapf(err, "vgdisplay %s failed %s: %s", vgName, out, err)
 	}
-	return nil
+	return string(out), nil
 }
 
 func VgActive(vgName string, active, autoActivation bool) error {

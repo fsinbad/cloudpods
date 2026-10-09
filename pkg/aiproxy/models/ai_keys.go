@@ -23,6 +23,7 @@ import (
 	"yunion.io/x/pkg/errors"
 	"yunion.io/x/sqlchemy"
 
+	"yunion.io/x/onecloud/pkg/apis"
 	api "yunion.io/x/onecloud/pkg/apis/aiproxy"
 	"yunion.io/x/onecloud/pkg/cloudcommon/db"
 	"yunion.io/x/onecloud/pkg/httperrors"
@@ -32,12 +33,13 @@ import (
 
 // SAiKey stores a named upstream API key (or other secret material) for reuse by routing or providers.
 type SAiKey struct {
-	db.SEnabledStatusStandaloneResourceBase
+	db.SVirtualResourceBase
+	db.SEnabledResourceBase
 
 	// AiProviderId optionally associates this key with a catalog provider row.
 	AiProviderId string `width:"128" charset:"ascii" nullable:"true" list:"user" create:"optional" update:"user"`
 	// Secret holds raw key material; only privileged scopes should list it.
-	Secret string `width:"4096" charset:"ascii" nullable:"false" create:"required"`
+	Secret string `width:"4096" charset:"ascii" nullable:"false" create:"required" get:"user"`
 	// Weight is used for weighted random load balancing among matching keys (default 1).
 	Weight int `default:"1" nullable:"false" list:"user" create:"optional" update:"user"`
 	// Routing limits which request "model" values may use this key.
@@ -45,14 +47,15 @@ type SAiKey struct {
 }
 
 type SAiKeyManager struct {
-	db.SEnabledStatusStandaloneResourceBaseManager
+	db.SVirtualResourceBaseManager
+	db.SEnabledResourceBaseManager
 }
 
 var AiKeyManager *SAiKeyManager
 
 func init() {
 	AiKeyManager = &SAiKeyManager{
-		SEnabledStatusStandaloneResourceBaseManager: db.NewEnabledStatusStandaloneResourceBaseManager(
+		SVirtualResourceBaseManager: db.NewVirtualResourceBaseManager(
 			SAiKey{},
 			"ai_keys_tbl",
 			"ai_key",
@@ -62,20 +65,120 @@ func init() {
 	AiKeyManager.SetVirtualObject(AiKeyManager)
 }
 
+func (manager *SAiKeyManager) InitializeData() error {
+	if err := backfillEmptyTenantId(manager); err != nil {
+		return err
+	}
+	return migrateAiKeySecrets()
+}
+
+func (k *SAiKey) BeforeInsert() {
+	if len(k.Id) == 0 {
+		k.Id = db.DefaultUUIDGenerator()
+	}
+	if err := k.sealSecret(); err != nil {
+		log.Errorf("ai_key sealSecret: %v", err)
+	}
+	k.SVirtualResourceBase.BeforeInsert()
+}
+
+func (k *SAiKey) BeforeUpdate() {
+	if err := k.sealSecret(); err != nil {
+		log.Errorf("ai_key sealSecret: %v", err)
+	}
+}
+
+func (k *SAiKey) GetSecret() string {
+	return decryptAtRest(k.Id, k.Secret)
+}
+
+func (k *SAiKey) sealSecret() error {
+	if len(k.Id) == 0 {
+		k.Id = db.DefaultUUIDGenerator()
+	}
+	plain := strings.TrimSpace(decryptAtRest(k.Id, k.Secret))
+	if plain == "" {
+		return nil
+	}
+	if secretLooksEncrypted(k.Secret) {
+		return nil
+	}
+	enc, err := encryptAtRest(k.Id, plain)
+	if err != nil {
+		return err
+	}
+	k.Secret = enc
+	return nil
+}
+
+func migrateAiKeySecrets() error {
+	keys := make([]SAiKey, 0)
+	q := queryUnprefixedSecret(AiKeyManager.Query(), "secret")
+	if err := q.All(&keys); err != nil {
+		return errors.Wrap(err, "list ai_keys for secret migrate")
+	}
+	for i := range keys {
+		k := &keys[i]
+		k.SetModelManager(AiKeyManager, k)
+		_, err := db.Update(k, func() error {
+			return k.sealSecret()
+		})
+		if err != nil {
+			return errors.Wrapf(err, "encrypt ai_key %s secret", k.Id)
+		}
+	}
+	return nil
+}
+
 func (manager *SAiKeyManager) ListItemFilter(
 	ctx context.Context,
 	q *sqlchemy.SQuery,
 	userCred mcclient.TokenCredential,
 	query api.AiKeyListInput,
 ) (*sqlchemy.SQuery, error) {
-	q, err := manager.SEnabledStatusStandaloneResourceBaseManager.ListItemFilter(ctx, q, userCred, query.EnabledStatusStandaloneResourceListInput)
+	q, err := manager.SVirtualResourceBaseManager.ListItemFilter(ctx, q, userCred, query.VirtualResourceListInput)
 	if err != nil {
-		return nil, errors.Wrap(err, "SEnabledStatusStandaloneResourceBaseManager.ListItemFilter")
+		return nil, errors.Wrap(err, "SVirtualResourceBaseManager.ListItemFilter")
+	}
+	q, err = manager.SEnabledResourceBaseManager.ListItemFilter(ctx, q, userCred, query.EnabledResourceBaseListInput)
+	if err != nil {
+		return nil, errors.Wrap(err, "SEnabledResourceBaseManager.ListItemFilter")
 	}
 	if id := strings.TrimSpace(query.AiProviderId); id != "" {
 		q = q.Equals("ai_provider_id", id)
 	}
 	return q, nil
+}
+
+func (manager *SAiKeyManager) OrderByExtraFields(
+	ctx context.Context,
+	q *sqlchemy.SQuery,
+	userCred mcclient.TokenCredential,
+	query api.AiKeyListInput,
+) (*sqlchemy.SQuery, error) {
+	return manager.SVirtualResourceBaseManager.OrderByExtraFields(ctx, q, userCred, query.VirtualResourceListInput)
+}
+
+func (manager *SAiKeyManager) QueryDistinctExtraField(q *sqlchemy.SQuery, field string) (*sqlchemy.SQuery, error) {
+	q, err := manager.SVirtualResourceBaseManager.QueryDistinctExtraField(q, field)
+	if err == nil {
+		return q, nil
+	}
+	return q, httperrors.ErrNotFound
+}
+
+func (k *SAiKey) PerformEnable(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformEnableInput) (jsonutils.JSONObject, error) {
+	if err := db.EnabledPerformEnable(k, ctx, userCred, true); err != nil {
+		return nil, errors.Wrap(err, "EnabledPerformEnable")
+	}
+	return nil, nil
+}
+
+func (k *SAiKey) PerformDisable(ctx context.Context, userCred mcclient.TokenCredential, query jsonutils.JSONObject, input apis.PerformDisableInput) (jsonutils.JSONObject, error) {
+	if err := db.EnabledPerformEnable(k, ctx, userCred, false); err != nil {
+		return nil, errors.Wrap(err, "EnabledPerformEnable")
+	}
+	return nil, nil
 }
 
 func (manager *SAiKeyManager) FetchCustomizeColumns(
@@ -87,11 +190,14 @@ func (manager *SAiKeyManager) FetchCustomizeColumns(
 	isList bool,
 ) []api.AiKeyDetails {
 	rows := make([]api.AiKeyDetails, len(objs))
-	baseRows := manager.SEnabledStatusStandaloneResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
+	baseRows := manager.SVirtualResourceBaseManager.FetchCustomizeColumns(ctx, userCred, query, objs, fields, isList)
 	providerIds := make([]string, len(objs))
 	for i := range objs {
-		rows[i].EnabledStatusStandaloneResourceDetails = baseRows[i]
+		rows[i].VirtualResourceDetails = baseRows[i]
 		k := objs[i].(*SAiKey)
+		plain := k.GetSecret()
+		k.Secret = plain
+		rows[i].Secret = plain
 		providerIds[i] = k.AiProviderId
 	}
 	providerNames, err := db.FetchIdNameMap2(AiProviderManager, providerIds)
@@ -113,9 +219,9 @@ func (manager *SAiKeyManager) ValidateCreateData(
 	input api.AiKeyCreateInput,
 ) (api.AiKeyCreateInput, error) {
 	var err error
-	input.EnabledStatusStandaloneResourceCreateInput, err = manager.SEnabledStatusStandaloneResourceBaseManager.ValidateCreateData(ctx, userCred, ownerId, query, input.EnabledStatusStandaloneResourceCreateInput)
+	input.VirtualResourceCreateInput, err = manager.SVirtualResourceBaseManager.ValidateCreateData(ctx, userCred, ownerId, query, input.VirtualResourceCreateInput)
 	if err != nil {
-		return input, errors.Wrap(err, "SEnabledStatusStandaloneResourceBaseManager.ValidateCreateData")
+		return input, errors.Wrap(err, "SVirtualResourceBaseManager.ValidateCreateData")
 	}
 	if input.Weight < 0 {
 		return input, errors.Wrap(httperrors.ErrInputParameter, "weight must be >= 0")
@@ -147,9 +253,9 @@ func (k *SAiKey) ValidateUpdateData(
 	input *api.AiKeyUpdateInput,
 ) (*api.AiKeyUpdateInput, error) {
 	var err error
-	input.EnabledStatusStandaloneResourceBaseUpdateInput, err = k.SEnabledStatusStandaloneResourceBase.ValidateUpdateData(ctx, userCred, query, input.EnabledStatusStandaloneResourceBaseUpdateInput)
+	input.VirtualResourceBaseUpdateInput, err = k.SVirtualResourceBase.ValidateUpdateData(ctx, userCred, query, input.VirtualResourceBaseUpdateInput)
 	if err != nil {
-		return input, errors.Wrap(err, "SEnabledStatusStandaloneResourceBase.ValidateUpdateData")
+		return input, errors.Wrap(err, "SVirtualResourceBase.ValidateUpdateData")
 	}
 	if input.Weight < 0 {
 		return input, errors.Wrap(httperrors.ErrInputParameter, "weight must be >= 0")

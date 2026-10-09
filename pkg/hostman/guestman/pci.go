@@ -531,9 +531,14 @@ func (s *SKVMGuestInstance) initSpiceDevices(pciRoot *desc.PCIController) {
 	spice.IntelHDA = &desc.SoundCard{
 		PCIDevice: desc.NewPCIDevice(pciRoot.CType, "intel-hda", "sound0"),
 		Codec: &desc.Codec{
-			Id:   "sound0-codec0",
-			Type: "hda-duplex",
-			Cad:  0,
+			Id:       "sound0-codec0",
+			Type:     "hda-duplex",
+			Cad:      0,
+			AudioDev: "audio0",
+		},
+		Audio: &desc.AudioDev{
+			Id:   "audio0",
+			Type: "spice",
 		},
 	}
 	var ehciId = "usbspice"
@@ -636,6 +641,9 @@ func (s *SKVMGuestInstance) ensurePciAddresses() error {
 	}
 	if s.Desc.VirtioSerial != nil {
 		err = s.ensureDevicePciAddress(s.Desc.VirtioSerial.PCIDevice, -1, nil)
+		if err != nil {
+			return errors.Wrap(err, "ensure virtio serial pci address")
+		}
 	}
 
 	if s.Desc.VdiDevice != nil && s.Desc.VdiDevice.Spice != nil {

@@ -209,9 +209,9 @@ func (self *SKVMGuestDriver) GetGuestVncInfo(ctx context.Context, userCred mccli
 	if err != nil {
 		return nil, errors.Wrapf(err, "Fail to request VNC info")
 	}
-	results, err := ret.GetString("results")
+	results, _ := ret.GetString("results")
 	if len(results) == 0 {
-		return nil, errors.Wrapf(err, "Can't get vnc information from host.")
+		return nil, errors.Wrapf(httperrors.ErrInvalidStatus, "Can't get vnc information from host.")
 	}
 	// info_vnc = result['results'].split('\n')
 	// port = int(info_vnc[1].split(':')[-1].split()[0])
@@ -259,13 +259,16 @@ func (self *SKVMGuestDriver) GetGuestVncInfo(ctx context.Context, userCred mccli
 func (self *SKVMGuestDriver) RequestStopOnHost(ctx context.Context, guest *models.SGuest, host *models.SHost, task taskman.ITask, syncStatus bool) error {
 	body := jsonutils.NewDict()
 	params := task.GetParams()
+	isForce, _ := params.Bool("is_force")
+	if isForce {
+		body.Set("is_force", jsonutils.JSONTrue)
+	}
 	timeout, err := params.Int("timeout")
 	if err != nil {
-		timeout = 30
-	}
-	isForce, err := params.Bool("is_force")
-	if isForce {
-		timeout = 0
+		timeout = int64(options.Options.DefaultGuestStopTimeout)
+		if isForce {
+			timeout = int64(options.Options.DefaultGuestForceStopTimeout)
+		}
 	}
 	body.Add(jsonutils.NewInt(timeout), "timeout")
 
@@ -671,6 +674,14 @@ func (self *SKVMGuestDriver) RequestSyncConfigOnHost(ctx context.Context, guest 
 	url := fmt.Sprintf("%s/servers/%s/sync", host.ManagerUri, guest.Id)
 	header := self.getTaskRequestHeader(task)
 	_, _, err = httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "POST", url, header, body, false)
+	return err
+}
+
+func (self *SKVMGuestDriver) RequestSetPortMappingOnHost(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, host *models.SHost, task taskman.ITask, input api.ServerSetPortMappingInput) error {
+	body := jsonutils.Marshal(input)
+	url := fmt.Sprintf("%s/servers/%s/set-port-mapping", host.ManagerUri, guest.Id)
+	header := self.getTaskRequestHeader(task)
+	_, _, err := httputils.JSONRequest(httputils.GetDefaultClient(), ctx, "POST", url, header, body, false)
 	return err
 }
 
@@ -1225,17 +1236,27 @@ func (self *SKVMGuestDriver) RequestGuestScreenDump(ctx context.Context, userCre
 
 func (self *SKVMGuestDriver) FetchMonitorUrl(ctx context.Context, guest *models.SGuest) string {
 	if options.Options.KvmMonitorAgentUseMetadataService && !guest.IsSriov() {
-		var metadataIp string
-		strictIpv6, err := guest.IsStrictIpv6()
+		// Only guests in a non-default onecloud VPC are guaranteed to reach the
+		// metadata service at the link-local address, those subnets are served
+		// by sdnagent with a per-subnet netns proxy. Guests in the default VPC
+		// and classic networks keep using the public TSDB endpoint.
+		inVpc, err := guest.IsOneCloudVpcNetwork()
 		if err != nil {
-			log.Errorf("IsStrictIpv6 for guest %s error: %v", guest.Id, err)
+			log.Errorf("IsOneCloudVpcNetwork for guest %s error: %v", guest.Id, err)
 		}
-		if strictIpv6 {
-			metadataIp = "[" + options.Options.MetadataServerIp6s[0] + "]"
-		} else {
-			metadataIp = options.Options.MetadataServerIp4s[0]
+		if inVpc {
+			var metadataIp string
+			strictIpv6, err := guest.IsStrictIpv6()
+			if err != nil {
+				log.Errorf("IsStrictIpv6 for guest %s error: %v", guest.Id, err)
+			}
+			if strictIpv6 {
+				metadataIp = "[" + options.Options.MetadataServerIp6s[0] + "]"
+			} else {
+				metadataIp = options.Options.MetadataServerIp4s[0]
+			}
+			return fmt.Sprintf(apis.MetaServiceMonitorAgentUrl, metadataIp)
 		}
-		return fmt.Sprintf(apis.MetaServiceMonitorAgentUrl, metadataIp)
 	}
 	return self.SVirtualizedGuestDriver.FetchMonitorUrl(ctx, guest)
 }

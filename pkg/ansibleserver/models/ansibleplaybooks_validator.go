@@ -87,10 +87,13 @@ func (v *ValidatorAnsiblePlaybook) Validate(ctx context.Context, data *jsonutils
 			}
 		}
 	}
-	// add LF for privateKey
-	if len(pb.PrivateKey) > 0 && pb.PrivateKey[len(pb.PrivateKey)-1] != 10 {
-		pb.PrivateKey = append(pb.PrivateKey, 10)
+	if err := ansible.ValidatePlaybook(pb); err != nil {
+		return httperrors.NewInputParameterError("%s", err.Error())
 	}
+	// add LF for privateKey
+	// if len(pb.PrivateKey) > 0 && pb.PrivateKey[len(pb.PrivateKey)-1] != 10 {
+	//	pb.PrivateKey = append(pb.PrivateKey, 10)
+	//}
 	pbJson := jsonutils.Marshal(pb)
 	if serialized := pbJson.String(); len(serialized) > PlaybookMaxBytes {
 		return httperrors.NewBadRequestError("playbook too big, got %d bytes, exceeding %d",

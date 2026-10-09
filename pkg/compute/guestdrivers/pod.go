@@ -159,6 +159,32 @@ func (p *SPodDriver) validateContainerData(ctx context.Context, userCred mcclien
 	if err := p.validateContainerVolumeMounts(ctx, userCred, ctr, input); err != nil {
 		return errors.Wrap(err, "validate container volumes")
 	}
+	if err := p.validateContainerDevices(ctx, userCred, ctr, input); err != nil {
+		return errors.Wrap(err, "validate container devices")
+	}
+	return nil
+}
+
+func (p *SPodDriver) validateContainerDevices(ctx context.Context, userCred mcclient.TokenCredential, ctr *api.PodContainerCreateInput, input *api.ServerCreateInput) error {
+	for idx, dev := range ctr.Devices {
+		if err := p.validateContainerDevice(ctx, userCred, dev, input); err != nil {
+			return errors.Wrapf(err, "validate device %d", idx)
+		}
+	}
+	return nil
+}
+
+func (p *SPodDriver) validateContainerDevice(ctx context.Context, userCred mcclient.TokenCredential, dev *api.ContainerDevice, input *api.ServerCreateInput) error {
+	if dev.Type == "" {
+		return httperrors.NewNotEmptyError("type is required")
+	}
+	drv, err := models.GetContainerDeviceDriverWithError(dev.Type)
+	if err != nil {
+		return errors.Wrapf(err, "get container device driver %s", dev.Type)
+	}
+	if err := drv.ValidatePodCreateData(ctx, userCred, dev, input); err != nil {
+		return errors.Wrapf(err, "validate %s create data", dev.Type)
+	}
 	return nil
 }
 
@@ -344,7 +370,7 @@ func (p *SPodDriver) StartGuestStopTask(guest *models.SGuest, ctx context.Contex
 	return task.ScheduleRun(nil)
 }
 
-func (p *SPodDriver) StartGuestRestartTask(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, parentTaskId string) error {
+func (p *SPodDriver) StartGuestRestartTask(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, timeout *int, parentTaskId string) error {
 	data := jsonutils.NewDict()
 	data.Set("is_force", jsonutils.NewBool(isForce))
 	if err := guest.SetStatus(ctx, userCred, api.VM_STOPPING, ""); err != nil {

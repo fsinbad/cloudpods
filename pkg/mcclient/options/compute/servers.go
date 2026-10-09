@@ -123,7 +123,13 @@ type ServerSSHLoginOptions struct {
 type ServerConvertToKvmOptions struct {
 	ServerIdsOptions
 
-	PreferHost string `help:"Prefer host id or name" json:"prefer_host"`
+	PreferHost        string `help:"Prefer host id or name" json:"prefer_host"`
+	SysDiskBackend    string `help:"Prefer disk backend for system disk, e.g. local/lvm/slvm/nfs/rbd" json:"sys_disk_backend"`
+	SysPreferStorage  string `help:"Prefer storage id or name for system disk" json:"sys_prefer_storage"`
+	SysDiskMedium     string `help:"Prefer medium for system disk, e.g. rotate/ssd/hybrid" json:"sys_disk_medium"`
+	DataDiskBackend   string `help:"Prefer disk backend for data disks, e.g. local/lvm/slvm/nfs/rbd" json:"data_disk_backend"`
+	DataPreferStorage string `help:"Prefer storage id or name for data disks" json:"data_prefer_storage"`
+	DataDiskMedium    string `help:"Prefer medium for data disks, e.g. rotate/ssd/hybrid" json:"data_disk_medium"`
 }
 
 func (o *ServerConvertToKvmOptions) Params() (jsonutils.JSONObject, error) {
@@ -304,7 +310,7 @@ type ServerCreateCommonConfig struct {
 		--disk 'size=40g,image=<id>,backend=cloud_essd'
 		--disk 'size=500M'
 		--disk 'snapshot_id=1ceb8c6d-6571-451d-8957-4bd3a871af85'
-	" nargs:"+" mcp:"true"`
+	" mcp:"true"`
 	DiskSchedtag []string `help:"Disk schedtag description, e.g. '0:<tag>:<strategy>'"`
 }
 
@@ -394,6 +400,7 @@ type ServerConfigs struct {
 	BackupHost                   string `help:"Preferred host where virtual backup server should be created"`
 	AutoSwitchToBackupOnHostDown bool   `help:"Auto switch to backup server on host down"`
 	Daemon                       *bool  `help:"Set as a daemon server" json:"is_daemon"`
+	QemuVersion                  string `help:"specific server guest start version" json:"qemu_version"`
 
 	RaidConfig      []string `help:"Baremetal raid config" json:"-"`
 	RootDiskMatcher string   `help:"Baremetal root disk matcher, e.g. 'device=/dev/sdb' 'size=900G' 'size_start=800G,size_end=900G'" json:"-"`
@@ -408,6 +415,7 @@ func (o ServerConfigs) Data() (*computeapi.ServerConfigs, error) {
 	data.PreferBackupHost = o.BackupHost
 	data.IsDaemon = o.Daemon
 	data.Hypervisor = o.Hypervisor
+	data.QemuVersion = o.QemuVersion
 	if len(o.RaidConfig) > 0 {
 		// if data.Hypervisor != "baremetal" {
 		// 	return nil, fmt.Errorf("RaidConfig is applicable to baremetal ONLY")
@@ -481,38 +489,39 @@ type ServerCreateOptionalOptions struct {
 	EnableMemclean bool   `help:"clean guest memory after guest exit" json:"enable_memclean"`
 	EnableTpm      bool   `help:"enable tpm device" json:"enable_tpm"`
 
-	Keypair            string   `help:"SSH Keypair" mcp:"true"`
-	Password           string   `help:"Default user password" mcp:"true"`
-	LoginAccount       string   `help:"Guest login account" mcp:"true"`
-	Iso                string   `help:"ISO image ID" metavar:"IMAGE_ID" json:"cdrom" mcp:"true"`
-	IsoBootIndex       *int8    `help:"Iso bootindex" metavar:"IMAGE_BOOT_INDEX" json:"cdrom_boot_index"`
-	VcpuCount          int      `help:"#CPU cores of VM server, default 1" default:"1" metavar:"<SERVER_CPU_COUNT>" json:"vcpu_count" token:"ncpu" mcp:"true"`
-	ExtraCpuCount      int      `help:"Extra allocate cpu count" json:"extra_cpu_count"`
-	InstanceType       string   `help:"instance flavor" mcp:"true"`
-	Vga                string   `help:"VGA driver" choices:"std|vmware|cirrus|qxl|virtio"`
-	Vdi                string   `help:"VDI protocol" choices:"vnc|spice"`
-	Bios               string   `help:"BIOS" choices:"BIOS|UEFI" mcp:"true"`
-	Machine            string   `help:"Machine type" choices:"pc|q35"`
-	Desc               string   `help:"Description" metavar:"<DESCRIPTION>" json:"description"`
-	Boot               string   `help:"Boot device" metavar:"<BOOT_DEVICE>" choices:"disk|cdrom" json:"-"`
-	EnableCloudInit    bool     `help:"Enable cloud-init service"`
-	NoAccountInit      *bool    `help:"Not reset account password"`
-	AllowDelete        *bool    `help:"Allow deleting the server (disable_delete=false)" json:"-"`
-	ShutdownBehavior   string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate|stop_release_gpu"`
-	AutoStart          bool     `help:"Auto start server after it is created" mcp:"true"`
-	Deploy             []string `help:"Specify deploy files in virtual server file system" json:"-"`
-	DeployTelegraf     bool     `help:"Deploy telegraf agent if guest os is supported"`
-	Group              []string `help:"Group ID or Name of virtual server"`
-	System             bool     `help:"Create a system VM, sysadmin ONLY option" json:"is_system"`
-	TaskNotify         *bool    `help:"Setup task notify" json:"-"`
-	FakeCreate         *bool    `help:"Fake create server"`
-	DryRun             *bool    `help:"Dry run to validate create params (not preschedule)；MCP 创建会自动调 scheduler-forecast 预调度，一般无需手动传" json:"-" mcp:"true"`
-	UserDataFile       string   `help:"user_data file path" json:"-"`
-	InstanceSnapshot   string   `help:"instance snapshot" json:"instance_snapshot"`
-	Secgroups          []string `help:"Security group IDs or names" json:"secgroups"`
-	NetworkTags        []string `help:"GCP network tags, google only; when set, secgroups can be omitted" json:"network_tags"`
-	DisableSrcIpCheck  *bool    `help:"Disable source IP check" json:"-"`
-	DisableSrcMacCheck *bool    `help:"Disable source MAC check" json:"-"`
+	Keypair                string   `help:"SSH Keypair" mcp:"true"`
+	Password               string   `help:"Default user password" mcp:"true"`
+	LoginAccount           string   `help:"Guest login account" mcp:"true"`
+	Iso                    string   `help:"ISO image ID" metavar:"IMAGE_ID" json:"cdrom" mcp:"true"`
+	IsoBootIndex           *int8    `help:"Iso bootindex" metavar:"IMAGE_BOOT_INDEX" json:"cdrom_boot_index"`
+	VcpuCount              int      `help:"#CPU cores of VM server, default 1" default:"1" metavar:"<SERVER_CPU_COUNT>" json:"vcpu_count" token:"ncpu" mcp:"true"`
+	ExtraCpuCount          int      `help:"Extra allocate cpu count" json:"extra_cpu_count"`
+	InstanceType           string   `help:"instance flavor" mcp:"true"`
+	Vga                    string   `help:"VGA driver" choices:"std|vmware|cirrus|qxl|virtio"`
+	Vdi                    string   `help:"VDI protocol" choices:"vnc|spice"`
+	Bios                   string   `help:"BIOS" choices:"BIOS|UEFI" mcp:"true"`
+	Machine                string   `help:"Machine type" choices:"pc|q35"`
+	Desc                   string   `help:"Description" metavar:"<DESCRIPTION>" json:"description"`
+	Boot                   string   `help:"Boot device" metavar:"<BOOT_DEVICE>" choices:"disk|cdrom" json:"-"`
+	EnableCloudInit        bool     `help:"Enable cloud-init service"`
+	NoAccountInit          *bool    `help:"Not reset account password"`
+	AllowDelete            *bool    `help:"Allow deleting the server (disable_delete=false)" json:"-"`
+	ShutdownBehavior       string   `help:"Behavior after VM server shutdown" metavar:"<SHUTDOWN_BEHAVIOR>" choices:"stop|terminate|stop_release_gpu"`
+	AutoStart              bool     `help:"Auto start server after it is created" mcp:"true"`
+	Deploy                 []string `help:"Specify deploy files in virtual server file system" json:"-"`
+	DeployTelegraf         bool     `help:"Deploy telegraf agent if guest os is supported"`
+	Group                  []string `help:"Group ID or Name of virtual server"`
+	System                 bool     `help:"Create a system VM, sysadmin ONLY option" json:"is_system"`
+	TaskNotify             *bool    `help:"Setup task notify" json:"-"`
+	FakeCreate             *bool    `help:"Fake create server"`
+	FakeCreateFromBmImport *bool    `help:"Fake create from import baremetal"`
+	DryRun                 *bool    `help:"Dry run to validate create params (not preschedule)；MCP 创建会自动调 scheduler-forecast 预调度，一般无需手动传" json:"-" mcp:"true"`
+	UserDataFile           string   `help:"user_data file path" json:"-"`
+	InstanceSnapshot       string   `help:"instance snapshot" json:"instance_snapshot"`
+	Secgroups              []string `help:"Security group IDs or names" json:"secgroups"`
+	NetworkTags            []string `help:"GCP network tags, google only; when set, secgroups can be omitted" json:"network_tags"`
+	DisableSrcIpCheck      *bool    `help:"Disable source IP check" json:"-"`
+	DisableSrcMacCheck     *bool    `help:"Disable source MAC check" json:"-"`
 
 	OsType string `help:"os type, e.g. Linux, Windows, etc." mcp:"true"`
 
@@ -642,6 +651,10 @@ func (opts *ServerCreateOptionalOptions) OptionalParams() (*computeapi.ServerCre
 
 	if opts.FakeCreate != nil {
 		params.FakeCreate = *opts.FakeCreate
+	}
+
+	if opts.FakeCreateFromBmImport != nil {
+		params.FakeCreateFromBmImport = *opts.FakeCreateFromBmImport
 	}
 
 	if len(opts.EncryptKey) > 0 {
@@ -794,6 +807,7 @@ type ServerStopOptions struct {
 	ID           []string `help:"ID or Name of server" json:"-"`
 	Force        *bool    `help:"Stop server forcefully" json:"is_force" mcp:"true"`
 	StopCharging *bool    `help:"Stop charging when server stop" mcp:"true"`
+	TimeoutSecs  *int     `help:"Guest stop timeout seconds" json:"timeout_secs" mcp:"true"`
 }
 
 func (o *ServerStopOptions) GetIds() []string {
@@ -1031,12 +1045,13 @@ func (o *ServerKickstartCompleteOptions) Params() (jsonutils.JSONObject, error) 
 	return options.StructToParams(o)
 }
 
+// ServerMonitorOptions 不注册为 MCP tool（无 mcp-desc tag）：向虚机发送任意
+// HMP/QMP 命令（如 pmemsave/migrate）超出"监控"语义，经 LLM 通道可被提示注入
+// 无感知触发，禁止 AI 调用。仅保留 climc 命令行与受控 API 使用。
 type ServerMonitorOptions struct {
-	_ struct{} `mcp-desc:"【QEMU Monitor，不是监控指标】向虚机发送 HMP/QMP。查 CPU/内存等指标请用 climc_monitor_unifiedmonitor_query"`
-
 	ServerIdOptions
 
-	Qmp     bool   `help:"Use qmp protocol, default is hmp" mcp:"true"`
+	Qmp     bool   `help:"Use qmp protocol, default is hmp"`
 	COMMAND string `help:"Qemu Monitor command to send"`
 }
 
@@ -1210,11 +1225,9 @@ func (o *ServerRebuildRootOptions) Params() (jsonutils.JSONObject, error) {
 	if err != nil {
 		return nil, err
 	}
+	params.Set("reset_password", jsonutils.JSONTrue)
 	if o.NoAccountInit != nil && *o.NoAccountInit {
 		params.Add(jsonutils.JSONFalse, "reset_password")
-	}
-	if o.Password != "" {
-		params.Set("reset_password", jsonutils.JSONTrue)
 	}
 	return params, nil
 }
@@ -1344,8 +1357,9 @@ func (o *ServerResetOptions) Params() (jsonutils.JSONObject, error) {
 type ServerRestartOptions struct {
 	_ struct{} `mcp-desc:"重启虚机（真正执行）。未知 id 时先 climc_server_list；拿到 id 后立刻调用，仅查询不算完成"`
 
-	ID      []string `help:"ID of servers to operate" metavar:"SERVER" json:"-"`
-	IsForce *bool    `help:"Force reset or not; default false" json:"is_force" mcp:"true"`
+	ID          []string `help:"ID of servers to operate" metavar:"SERVER" json:"-"`
+	IsForce     *bool    `help:"Force reset or not; default false" json:"is_force" mcp:"true"`
+	TimeoutSecs *int     `help:"Guest restart stop guest timeout" json:"timeout_secs" mcp:"true"`
 }
 
 func (o *ServerRestartOptions) GetIds() []string {
@@ -1718,6 +1732,18 @@ type ServerSetNetworkNumQueues struct {
 }
 
 func (o *ServerSetNetworkNumQueues) Params() (jsonutils.JSONObject, error) {
+	return jsonutils.Marshal(o), nil
+}
+
+type ServerSetIsoOptions struct {
+	ServerIdOptions
+
+	CDROM_ORDINAL int64  `json:"cdrom_ordinal" help:"cdrom ordinal"`
+	ImageId       string `help:"Iso image id, eject on image id empty"`
+	BootIndex     *int8  `help:"Iso boot index"`
+}
+
+func (o *ServerSetIsoOptions) Params() (jsonutils.JSONObject, error) {
 	return jsonutils.Marshal(o), nil
 }
 

@@ -745,6 +745,10 @@ func init() {
 		EN("Suggestion").
 		CN("计费服务"),
 	)
+	s.Set(apis.SERVICE_TYPE_YUNIONCONF, i18n.NewTableEntry().
+		EN("Configuration").
+		CN("配置服务"),
+	)
 	s.Set("k8s", i18n.NewTableEntry().
 		EN("Kubernetes").
 		CN("容器服务"),
@@ -756,6 +760,10 @@ func init() {
 	o.Set("domain", i18n.NewTableEntry().
 		EN("Domain").
 		CN("域"),
+	)
+	o.Set("parameter", i18n.NewTableEntry().
+		EN("Parameter").
+		CN("配置"),
 	)
 	o.Set("kubemachine", i18n.NewTableEntry().
 		EN("Kube Machine").
@@ -1475,6 +1483,11 @@ func init() {
 	o.Set(ACT_SAVE_IMAGE, i18n.NewTableEntry().
 		EN("Save Image").
 		CN("保存镜像"),
+	)
+
+	o.Set(ACT_RESUME_IMPORT, i18n.NewTableEntry().
+		EN("Resume Import").
+		CN("继续导入"),
 	)
 
 	o.Set(ACT_CLOUD_SYNC, i18n.NewTableEntry().

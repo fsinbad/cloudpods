@@ -87,7 +87,7 @@ type IGuestDriver interface {
 	CanStop(guest *SGuest) error
 	StartGuestStopTask(guest *SGuest, ctx context.Context, userCred mcclient.TokenCredential, params *jsonutils.JSONDict, parentTaskId string) error
 	StartGuestResetTask(guest *SGuest, ctx context.Context, userCred mcclient.TokenCredential, isHard bool, parentTaskId string) error
-	StartGuestRestartTask(guest *SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, parentTaskId string) error
+	StartGuestRestartTask(guest *SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, timeout *int, parentTaskId string) error
 
 	RequestSoftReset(ctx context.Context, guest *SGuest, task taskman.ITask) error
 
@@ -108,6 +108,8 @@ type IGuestDriver interface {
 
 	RequestSyncConfigOnHost(ctx context.Context, guest *SGuest, host *SHost, task taskman.ITask) error
 	RequestSyncSecgroupsOnHost(ctx context.Context, guest *SGuest, host *SHost, task taskman.ITask) error
+
+	RequestSetPortMappingOnHost(ctx context.Context, userCred mcclient.TokenCredential, guest *SGuest, host *SHost, task taskman.ITask, input api.ServerSetPortMappingInput) error
 
 	RequestSyncstatusOnHost(ctx context.Context, guest *SGuest, host *SHost, userCred mcclient.TokenCredential, task taskman.ITask) error
 

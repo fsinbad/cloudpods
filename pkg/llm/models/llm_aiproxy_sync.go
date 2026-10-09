@@ -304,7 +304,7 @@ func firstResourceID(rows []jsonutils.JSONObject) string {
 
 // ensureAiKeyForProvider guarantees an enabled ai_key with secret for chat upstream resolve.
 // If the provider already has an enabled key, existing user keys are left untouched.
-func ensureAiKeyForProvider(session *mcclient.ClientSession, providerId, keyName string) error {
+func ensureAiKeyForProvider(session *mcclient.ClientSession, providerId, keyName, projectId, domainId string) error {
 	providerId = strings.TrimSpace(providerId)
 	if providerId == "" {
 		return errors.Wrap(httperrors.ErrInvalidStatus, "ai_provider id is empty")
@@ -337,6 +337,12 @@ func ensureAiKeyForProvider(session *mcclient.ClientSession, providerId, keyName
 	params.Set("secret", jsonutils.NewString(aiproxyPlaceholderAPIKey))
 	params.Set("weight", jsonutils.NewInt(1))
 	params.Set("enabled", jsonutils.JSONTrue)
+	if pid := strings.TrimSpace(projectId); pid != "" {
+		params.Set("project_id", jsonutils.NewString(pid))
+	}
+	if did := strings.TrimSpace(domainId); did != "" {
+		params.Set("domain_id", jsonutils.NewString(did))
+	}
 
 	if existing, getErr := apmodules.AiKeys.Get(session, keyName, nil); getErr == nil && existing != nil {
 		existingProviderId, _ := existing.GetString("ai_provider_id")
@@ -369,7 +375,7 @@ func ensureAiKeyForProvider(session *mcclient.ClientSession, providerId, keyName
 
 func upsertAiProvider(
 	session *mcclient.ClientSession,
-	name, providerKey, baseURL, llmDeploymentId, llmId string,
+	name, providerKey, baseURL, llmDeploymentId, llmId, projectId, domainId string,
 ) (string, error) {
 	filter := jsonutils.NewDict()
 	if llmId != "" {
@@ -389,6 +395,12 @@ func upsertAiProvider(
 	params.Set("llm_id", jsonutils.NewString(llmId))
 	params.Set("enabled", jsonutils.JSONTrue)
 	params.Set("name", jsonutils.NewString(name))
+	if pid := strings.TrimSpace(projectId); pid != "" {
+		params.Set("project_id", jsonutils.NewString(pid))
+	}
+	if did := strings.TrimSpace(domainId); did != "" {
+		params.Set("domain_id", jsonutils.NewString(did))
+	}
 
 	existingId := firstResourceID(rows)
 	if existingId == "" {
@@ -406,7 +418,7 @@ func upsertAiProvider(
 	return existingId, nil
 }
 
-func upsertAiModel(session *mcclient.ClientSession, name, providerId, modelKey string) (string, error) {
+func upsertAiModel(session *mcclient.ClientSession, name, providerId, modelKey, projectId, domainId string) (string, error) {
 	filter := jsonutils.NewDict()
 	filter.Set("ai_provider_id", jsonutils.NewString(providerId))
 	filter.Set("model_key", jsonutils.NewString(modelKey))
@@ -419,6 +431,12 @@ func upsertAiModel(session *mcclient.ClientSession, name, providerId, modelKey s
 	params.Set("model_key", jsonutils.NewString(modelKey))
 	params.Set("enabled", jsonutils.JSONTrue)
 	params.Set("name", jsonutils.NewString(name))
+	if pid := strings.TrimSpace(projectId); pid != "" {
+		params.Set("project_id", jsonutils.NewString(pid))
+	}
+	if did := strings.TrimSpace(domainId); did != "" {
+		params.Set("domain_id", jsonutils.NewString(did))
+	}
 
 	existingId := firstResourceID(rows)
 	if existingId == "" {
@@ -520,18 +538,18 @@ func SyncLlmInstance(ctx context.Context, userCred mcclient.TokenCredential, dep
 
 	session := aiproxyAdminSession(ctx)
 	providerName := aiProviderNameForLlm(llm)
-	providerId, err := upsertAiProvider(session, providerName, providerKey, baseURL, dep.Id, llm.Id)
+	providerId, err := upsertAiProvider(session, providerName, providerKey, baseURL, dep.Id, llm.Id, dep.ProjectId, dep.DomainId)
 	if err != nil {
 		return nil, err
 	}
-	if err := ensureAiKeyForProvider(session, providerId, aiKeyNameForProvider(providerName)); err != nil {
+	if err := ensureAiKeyForProvider(session, providerId, aiKeyNameForProvider(providerName), dep.ProjectId, dep.DomainId); err != nil {
 		return nil, err
 	}
 
 	primaryModelId := ""
 	for _, mk := range modelKeys {
 		modelName := aiModelNameForLlm(llm, mk)
-		modelId, err := upsertAiModel(session, modelName, providerId, mk)
+		modelId, err := upsertAiModel(session, modelName, providerId, mk, dep.ProjectId, dep.DomainId)
 		if err != nil {
 			return nil, err
 		}
@@ -917,7 +935,21 @@ func DeleteDeploymentAiproxyResources(ctx context.Context, deploymentId string) 
 	return nil
 }
 
-// UnsyncLlmInstance removes aiproxy resources for one llm replica.
+// shouldUnsyncAiproxyOnLeaveRunning reports whether leaving running should
+// unbind/delete aiproxy catalog. Restart and stop keep routing IDs stable;
+// catalog is only removed on deployment delete or manual unregister.
+func shouldUnsyncAiproxyOnLeaveRunning() bool {
+	return false
+}
+
+// unsyncKeepsDeploymentRouting returns the routing id to persist after
+// UnsyncLlmInstance. The deployment-level ai_routing row is never deleted here.
+func unsyncKeepsDeploymentRouting(existingRoutingId string) (keepRoutingId string, deleteRouting bool) {
+	return strings.TrimSpace(existingRoutingId), false
+}
+
+// UnsyncLlmInstance unbinds one llm replica from the deployment routing.
+// It does not delete the deployment's ai_routing or clear AiproxyRoutingId.
 func UnsyncLlmInstance(ctx context.Context, userCred mcclient.TokenCredential, dep *SLLMDeployment, llmId string) error {
 	if dep == nil || strings.TrimSpace(llmId) == "" {
 		return nil
@@ -935,25 +967,23 @@ func UnsyncLlmInstance(ctx context.Context, userCred mcclient.TokenCredential, d
 		}
 	}
 
-	routingId := strings.TrimSpace(dep.AiproxyRoutingId)
-	if routingId == "" {
-		if err := deleteAiProviderByLlmId(session, llmId); err != nil {
-			return err
-		}
-		if err := persistDeploymentAiproxyBindings(dep, "", nil); err != nil {
-			return err
-		}
-		return dep.SetAiproxySyncStatus(ctx, userCred, api.AIPROXY_SYNC_STATUS_PENDING, "waiting for running replicas")
-	}
-
-	if len(remaining) == 0 {
+	routingId, deleteRouting := unsyncKeepsDeploymentRouting(dep.AiproxyRoutingId)
+	if deleteRouting {
 		if err := deleteAiRoutingById(session, routingId); err != nil {
 			log.Warningf("delete ai_routing %s: %v", routingId, err)
 		}
+		routingId = ""
+	}
+	if routingId == "" || len(remaining) == 0 {
+		if routingId != "" {
+			if err := applyRoutingModels(session, routingId, []apapi.AiRoutingModelItem{}); err != nil {
+				log.Warningf("clear ai_routing models %s: %v", routingId, err)
+			}
+		}
 		if err := deleteAiProviderByLlmId(session, llmId); err != nil {
 			return err
 		}
-		if err := persistDeploymentAiproxyBindings(dep, "", nil); err != nil {
+		if err := persistDeploymentAiproxyBindings(dep, routingId, nil); err != nil {
 			return err
 		}
 		return dep.SetAiproxySyncStatus(ctx, userCred, api.AIPROXY_SYNC_STATUS_PENDING, "waiting for running replicas")

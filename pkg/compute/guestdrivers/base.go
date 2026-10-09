@@ -215,9 +215,12 @@ func (drv *SBaseGuestDriver) StartGuestResetTask(guest *models.SGuest, ctx conte
 	return fmt.Errorf("Not Implement")
 }
 
-func (drv *SBaseGuestDriver) StartGuestRestartTask(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, parentTaskId string) error {
+func (drv *SBaseGuestDriver) StartGuestRestartTask(guest *models.SGuest, ctx context.Context, userCred mcclient.TokenCredential, isForce bool, timeout *int, parentTaskId string) error {
 	data := jsonutils.NewDict()
 	data.Set("is_force", jsonutils.NewBool(isForce))
+	if timeout != nil {
+		data.Set("timeout", jsonutils.NewInt(int64(*timeout)))
+	}
 	if err := guest.SetStatus(ctx, userCred, api.VM_STOPPING, ""); err != nil {
 		return err
 	}
@@ -314,7 +317,7 @@ func (drv *SBaseGuestDriver) IsSupportShutdownMode() bool {
 }
 
 func (drv *SBaseGuestDriver) RequestRenewInstance(ctx context.Context, guest *models.SGuest, bc billing.SBillingCycle) (time.Time, error) {
-	return time.Time{}, nil
+	return bc.EndAt(guest.GetExpiredAt()), nil
 }
 
 func (drv *SBaseGuestDriver) IsSupportEip() bool {
@@ -394,6 +397,10 @@ func (drv *SBaseGuestDriver) IsSupportGuestClone() bool {
 
 func (drv *SBaseGuestDriver) RequestSyncSecgroupsOnHost(ctx context.Context, guest *models.SGuest, host *models.SHost, task taskman.ITask) error {
 	return nil // do nothing
+}
+
+func (drv *SBaseGuestDriver) RequestSetPortMappingOnHost(ctx context.Context, userCred mcclient.TokenCredential, guest *models.SGuest, host *models.SHost, task taskman.ITask, input api.ServerSetPortMappingInput) error {
+	return fmt.Errorf("SBaseGuestDriver: Not Implement")
 }
 
 func (drv *SBaseGuestDriver) IsSupportPublicipToEip() bool {
@@ -723,7 +730,7 @@ func (base *SBaseGuestDriver) RequestUploadGuestStatus(ctx context.Context, gues
 }
 
 func (base *SBaseGuestDriver) CanStop(guest *models.SGuest) error {
-	if utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_STOP_FAILED, api.POD_STATUS_CRASH_LOOP_BACK_OFF, api.POD_STATUS_CONTAINER_EXITED, api.VM_KICKSTART_INSTALLING, api.VM_KICKSTART_FAILED, api.VM_KICKSTART_COMPLETED}) {
+	if utils.IsInStringArray(guest.Status, []string{api.VM_RUNNING, api.VM_STOP_FAILED, api.VM_STOPPING, api.POD_STATUS_CRASH_LOOP_BACK_OFF, api.POD_STATUS_CONTAINER_EXITED, api.VM_KICKSTART_INSTALLING, api.VM_KICKSTART_FAILED, api.VM_KICKSTART_COMPLETED}) {
 		return nil
 	}
 	return errors.Wrapf(errors.ErrInvalidStatus, "Cannot stop server in status %s", guest.Status)

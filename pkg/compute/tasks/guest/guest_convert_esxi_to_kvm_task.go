@@ -56,6 +56,8 @@ func (task *GuestConvertEsxiToKvmTask) GetSchedParams() (*schedapi.ScheduleInput
 	}
 
 	schedDesc := guest.ToSchedDesc()
+	// convert creates a new kvm guest; clear source host_id to avoid migrate storage checks
+	schedDesc.HostId = ""
 	if task.Params.Contains("prefer_host_id") {
 		preferHostId, _ := task.Params.GetString("prefer_host_id")
 		schedDesc.ServerConfig.PreferHost = preferHostId
@@ -64,6 +66,21 @@ func (task *GuestConvertEsxiToKvmTask) GetSchedParams() (*schedapi.ScheduleInput
 		schedDesc.Disks[i].Backend = ""
 		schedDesc.Disks[i].Medium = ""
 		schedDesc.Disks[i].Storage = ""
+		schedDesc.Disks[i].DiskId = ""
+		if i < len(input.Disks) {
+			if len(input.Disks[i].Backend) > 0 {
+				schedDesc.Disks[i].Backend = input.Disks[i].Backend
+			}
+			if len(input.Disks[i].Storage) > 0 {
+				schedDesc.Disks[i].Storage = input.Disks[i].Storage
+			}
+			if len(input.Disks[i].Medium) > 0 {
+				schedDesc.Disks[i].Medium = input.Disks[i].Medium
+			}
+			if input.Disks[i].Schedtags != nil {
+				schedDesc.Disks[i].Schedtags = input.Disks[i].Schedtags
+			}
+		}
 	}
 
 	schedDesc.Networks = input.Networks
@@ -211,6 +228,11 @@ func (task *GuestConvertEsxiToKvmTask) OnHostCreateGuest(
 			disk.Status = api.DISK_READY
 			return nil
 		})
+		if err != nil {
+			log.Errorf("update disk failed %s", err)
+			task.taskFailed(ctx, guest, jsonutils.NewString(err.Error()))
+			return
+		}
 		// TODO: update flat file path on guest start
 		err = disk.SetMetadata(ctx, api.DISK_META_REMOTE_ACCESS_PATH, esxiFlatFilePath, task.UserCred)
 		if err != nil {

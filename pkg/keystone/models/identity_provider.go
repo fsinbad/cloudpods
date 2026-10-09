@@ -347,6 +347,38 @@ func (manager *SIdentityProviderManager) getDriveInstanceCount(drvName string) (
 	return manager.Query().Equals("driver", drvName).CountWithError()
 }
 
+func (manager *SIdentityProviderManager) GetPropertyAttributeNames(ctx context.Context, userCred mcclient.TokenCredential, input api.IdentityProviderPropertyAttributeNamesInput) (jsonutils.JSONObject, error) {
+	var drvName string
+
+	template := input.Template
+	if len(template) > 0 {
+		if _, ok := api.IdpTemplateDriver[template]; !ok {
+			return nil, httperrors.NewInputParameterError("invalid template")
+		}
+		drvName = api.IdpTemplateDriver[template]
+		input.Driver = drvName
+	} else {
+		drvName = input.Driver
+		if len(drvName) == 0 {
+			return nil, httperrors.NewInputParameterError("missing driver")
+		}
+	}
+
+	drvCls := driver.GetDriverClass(drvName)
+	if drvCls == nil {
+		return nil, httperrors.NewInputParameterError("driver %s not supported", drvName)
+	}
+
+	attrs, err := drvCls.AttributeNames(input.Template)
+	if err != nil {
+		return nil, errors.Wrap(err, "AttributeNames")
+	}
+	if len(attrs) == 0 {
+		return jsonutils.NewDict(), nil
+	}
+	return jsonutils.Marshal(attrs), nil
+}
+
 func (manager *SIdentityProviderManager) ValidateCreateData(
 	ctx context.Context,
 	userCred mcclient.TokenCredential,
@@ -1271,6 +1303,7 @@ func (idp *SIdentityProvider) TryUserJoinProject(attrConf api.SIdpAttributeOptio
 	}
 
 	var targetProject *SProject
+	projectFromAttr := false
 	log.Debugf("userTryJoinProject resp %s proj %s", attrs, attrConf.ProjectAttribute)
 	if !consts.GetNonDefaultDomainProjects() {
 		// if non-default-domain-project is disabled, place new project in default domain
@@ -1293,6 +1326,9 @@ func (idp *SIdentityProvider) TryUserJoinProject(attrConf api.SIdpAttributeOptio
 					}
 				}
 			}
+			if targetProject != nil {
+				projectFromAttr = true
+			}
 		}
 	}
 	if targetProject == nil && len(attrConf.DefaultProjectId) > 0 {
@@ -1311,6 +1347,8 @@ func (idp *SIdentityProvider) TryUserJoinProject(attrConf api.SIdpAttributeOptio
 					targetRole, err := RoleManager.FetchRole("", roleName, domainId, "")
 					if err != nil {
 						log.Errorf("fetch role %s fail %s", roleName, err)
+					} else if err := validateIdpJoinRole(targetProject, targetRole, idpJoinAllowsSystemRole(projectFromAttr, true)); err != nil {
+						log.Errorf("skip role %s for idp %s: %s", roleName, idp.Name, err)
 					} else {
 						targetRoles = append(targetRoles, targetRole)
 					}
@@ -1321,6 +1359,8 @@ func (idp *SIdentityProvider) TryUserJoinProject(attrConf api.SIdpAttributeOptio
 			targetRole, err := RoleManager.FetchRoleById(attrConf.DefaultRoleId)
 			if err != nil {
 				log.Errorf("fetch default role %s fail %s", attrConf.DefaultRoleId, err)
+			} else if err := validateIdpJoinRole(targetProject, targetRole, idpJoinAllowsSystemRole(projectFromAttr, false)); err != nil {
+				log.Errorf("skip default role %s for idp %s: %s", targetRole.Name, idp.Name, err)
 			} else {
 				targetRoles = append(targetRoles, targetRole)
 			}

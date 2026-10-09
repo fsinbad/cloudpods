@@ -77,6 +77,7 @@ import (
 	"yunion.io/x/onecloud/pkg/util/redfish/bmconsole"
 	"yunion.io/x/onecloud/pkg/util/ssh"
 	"yunion.io/x/onecloud/pkg/util/sysutils"
+	"yunion.io/x/onecloud/pkg/util/timeutils2"
 )
 
 type SBaremetalManager struct {
@@ -460,7 +461,8 @@ func (m *SBaremetalManager) verifyMacAddr(sshCli *ssh.Client) (error, bool) {
 	var registered bool
 	params := jsonutils.NewDict()
 	for _, nic := range nicinfo {
-		if len(nic.Mac) > 0 {
+		// only verify Ethernet
+		if len(nic.Mac) == 6 {
 			params.Set("any_mac", jsonutils.NewString(nic.Mac.String()))
 			params.Set("scope", jsonutils.NewString("system"))
 			res, err := modules.Hosts.List(m.GetClientSession(), params)
@@ -925,6 +927,16 @@ func (b *SBaremetalInstance) SyncStatus(ctx context.Context, status string, reas
 		return
 	}
 	log.Infof("Update baremetal %s to status %s", b.GetId(), status)
+}
+
+func (b *SBaremetalInstance) AttachIsolatedDevices() {
+	params := jsonutils.NewDict()
+	_, err := modules.Hosts.PerformAction(b.GetClientSession(), b.GetId(), "attach_isolated_devices", params)
+	if err != nil {
+		log.Errorf("Attach baremetal %s isolated devices error: %v", b.GetId(), err)
+		return
+	}
+	log.Infof("Attach baremetal %s isolated devices", b.GetId())
 }
 
 func (b *SBaremetalInstance) AutoSyncAllStatus(ctx context.Context) {
@@ -1634,7 +1646,7 @@ func (b *SBaremetalInstance) GetServerSSHClient() (*ssh.Client, error) {
 		return nil, errors.Error("No server")
 	}
 
-	privateKey, err := modules.Sshkeypairs.FetchPrivateKey(context.TODO(), auth.AdminCredential())
+	privateKeys, err := modules.Sshkeypairs.FetchProjectPrivateKeys(context.TODO(), auth.AdminCredential())
 	if err != nil {
 		return nil, errors.Wrapf(err, "Get server %s login info", s.GetId())
 	}
@@ -1643,12 +1655,14 @@ func (b *SBaremetalInstance) GetServerSSHClient() (*ssh.Client, error) {
 	for idx, nic := range nics {
 		if nic.Ip != "" {
 			for _, user := range []string{"cloudroot", "root"} {
-				sshCli, err := ssh.NewClient(nic.Ip, 22, user, "", privateKey)
-				if err != nil {
-					err = errors.Wrapf(err, "New server %s ssh client %s@%s", s.GetName(), user, nic.Ip)
-					errs = append(errs, err)
-				} else {
-					return sshCli, nil
+				for _, privateKey := range privateKeys {
+					sshCli, err := ssh.NewClient(nic.Ip, 22, user, "", privateKey)
+					if err != nil {
+						err = errors.Wrapf(err, "New server %s ssh client %s@%s", s.GetName(), user, nic.Ip)
+						errs = append(errs, err)
+					} else {
+						return sshCli, nil
+					}
 				}
 			}
 		} else {
@@ -2090,6 +2104,11 @@ func (b *SBaremetalInstance) StartBaremetalCdromTask(userCred mcclient.TokenCred
 	return nil
 }
 
+func (b *SBaremetalInstance) StartDetectIsolatedDevices(userCred mcclient.TokenCredential, taskId string, data jsonutils.JSONObject) error {
+	b.StartNewTask(tasks.NewBaremetalIsolatedDevicesProbeTask, userCred, taskId, data)
+	return nil
+}
+
 func (b *SBaremetalInstance) DelayedServerReset(ctx context.Context, _ jsonutils.JSONObject) (jsonutils.JSONObject, error) {
 	err := b.DoPXEBoot()
 	return nil, err
@@ -2113,6 +2132,10 @@ func (b *SBaremetalInstance) StartServerCreateTask(ctx context.Context, userCred
 	b.desc.Set("server_id", jsonutils.NewString(b.server.GetId()))
 	if err := b.AutoSaveDesc(ctx); err != nil {
 		return err
+	}
+	if jsonutils.QueryBoolean(data, "fake_create_from_bm_import", false) {
+		timeutils2.AddTimeout(time.Second*3, func() { modules.ComputeTasks.TaskComplete(b.GetClientSession(), taskId, nil) })
+		return nil
 	}
 	b.StartNewTask(tasks.NewBaremetalServerCreateTask, userCred, taskId, data)
 	return nil
@@ -2153,7 +2176,15 @@ func (b *SBaremetalInstance) StartServerStopTask(userCred mcclient.TokenCredenti
 }
 
 func (b *SBaremetalInstance) StartServerDestroyTask(userCred mcclient.TokenCredential, taskId string, data jsonutils.JSONObject) {
-	b.StartNewTask(tasks.NewBaremetalServerDestroyTask, userCred, taskId, data)
+	if jsonutils.QueryBoolean(data, "purge", false) {
+		log.Infof("purge bm server %s", b.GetId())
+		timeutils2.AddTimeout(time.Second*3, func() {
+			b.RemoveServer()
+			modules.ComputeTasks.TaskComplete(b.GetClientSession(), taskId, nil)
+		})
+	} else {
+		b.StartNewTask(tasks.NewBaremetalServerDestroyTask, userCred, taskId, data)
+	}
 }
 
 func (b *SBaremetalInstance) DelayedSyncIPMIInfo(ctx context.Context, data jsonutils.JSONObject) (jsonutils.JSONObject, error) {
@@ -3126,10 +3157,13 @@ func (s *SBaremetalServer) DoDeploy(tool *disktool.SSHPartitionTool, term *ssh.C
 		}
 	}
 	userData, _ := s.desc.GetString("user_data")
+
+	deployTelegraf := jsonutils.QueryBoolean(data, "deploy_telegraf", false)
+	telegrafConfig, _ := data.GetString("telegraf_conf")
+
 	deployInfo := deployapi.NewDeployInfo(publicKey, deployArray,
 		password, isRandomPassword, isInit, true, o.Options.LinuxDefaultRootUser, o.Options.WindowsDefaultAdminUser, false, "",
-		false, "",
-		userData,
+		deployTelegraf, telegrafConfig, userData,
 	)
 	return s.deployFs(tool, term, deployInfo)
 }

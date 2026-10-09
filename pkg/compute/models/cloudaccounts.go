@@ -2205,6 +2205,9 @@ func (account *SCloudaccount) markAccountDisconected(ctx context.Context, userCr
 	if account.Status == api.CLOUD_PROVIDER_CONNECTED {
 		account.EventNotify(ctx, userCred, notify.ActionSyncAccountStatus)
 	}
+	if account.Status != api.CLOUD_PROVIDER_DISCONNECTED {
+		InvalidateNetworkUsableZoneIdsCache()
+	}
 	return account.SetStatus(ctx, userCred, api.CLOUD_PROVIDER_DISCONNECTED, reason)
 }
 
@@ -2228,6 +2231,9 @@ func (account *SCloudaccount) markAccountConnected(ctx context.Context, userCred
 		if err != nil {
 			return err
 		}
+	}
+	if account.Status != api.CLOUD_PROVIDER_CONNECTED {
+		InvalidateNetworkUsableZoneIdsCache()
 	}
 	return account.SetStatus(ctx, userCred, api.CLOUD_PROVIDER_CONNECTED, "")
 }
@@ -2523,10 +2529,11 @@ func (account *SCloudaccount) SubmitSyncAccountTask(ctx context.Context, userCre
 		}()
 		log.Debugf("syncAccountStatus %s %s", account.Id, account.Name)
 		err := account.syncAccountStatus(ctx, userCred, true)
+		if err != nil {
+			log.Errorf("syncAccountStatus %s %s fail: %s", account.Id, account.Name, err)
+			err = errors.Wrap(err, "account.syncAccountStatus")
+		}
 		if waitChan != nil {
-			if err != nil {
-				err = errors.Wrap(err, "account.syncAccountStatus")
-			}
 			waitChan <- err
 		}
 	})

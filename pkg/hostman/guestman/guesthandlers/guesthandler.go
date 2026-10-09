@@ -76,6 +76,7 @@ func AddGuestTaskHandler(prefix string, app *appsrv.Application) {
 			"stop":                     guestStop,
 			"monitor":                  guestMonitor,
 			"sync":                     guestSync,
+			"set-port-mapping":         guestSetPortMapping,
 			"suspend":                  guestSuspend,
 			"io-throttle":              guestIoThrottle,
 			"snapshot":                 guestSnapshot,
@@ -241,7 +242,8 @@ func guestStop(ctx context.Context, userCred mcclient.TokenCredential, sid strin
 	if err != nil {
 		timeout = 30
 	}
-	return nil, guestman.GetGuestManager().GuestStop(ctx, sid, timeout)
+	forceStop := jsonutils.QueryBoolean(body, "is_force", false)
+	return nil, guestman.GetGuestManager().GuestStop(ctx, sid, timeout, forceStop)
 }
 
 func guestMonitor(ctx context.Context, userCred mcclient.TokenCredential, sid string, body jsonutils.JSONObject) (interface{}, error) {
@@ -277,6 +279,21 @@ func guestSync(ctx context.Context, userCred mcclient.TokenCredential, sid strin
 	hostutils.DelayTask(ctx, guestman.GetGuestManager().GuestSync, &guestman.SBaseParams{
 		Sid:  sid,
 		Body: body,
+	})
+	return nil, nil
+}
+
+func guestSetPortMapping(ctx context.Context, userCred mcclient.TokenCredential, sid string, body jsonutils.JSONObject) (interface{}, error) {
+	if !guestman.GetGuestManager().IsGuestExist(sid) {
+		return nil, httperrors.NewNotFoundError("Guest %s not found", sid)
+	}
+	input := new(computeapi.ServerSetPortMappingInput)
+	if err := body.Unmarshal(input); err != nil {
+		return nil, httperrors.NewInputParameterError("unmarshal input %s", err)
+	}
+	hostutils.DelayTask(ctx, guestman.GetGuestManager().GuestSetPortMapping, &guestman.SGuestSetPortMapping{
+		Sid:   sid,
+		Input: input,
 	})
 	return nil, nil
 }
@@ -753,6 +770,13 @@ func guestDeleteSnapshot(ctx context.Context, userCred mcclient.TokenCredential,
 		TotalDeleteSnapshotCount: int(totalCnt),
 		DeletedSnapshotCount:     int(deletedCnt),
 	}
+	if snapshotIds, err := body.GetArray("snapshot_ids"); err == nil {
+		for _, snapshotId := range snapshotIds {
+			if id, err := snapshotId.GetString(); err == nil {
+				params.SnapshotIds = append(params.SnapshotIds, id)
+			}
+		}
+	}
 
 	if body.Contains("encrypt_info") {
 		encryptInfo := apis.SEncryptInfo{}
@@ -762,18 +786,6 @@ func guestDeleteSnapshot(ctx context.Context, userCred mcclient.TokenCredential,
 		params.EncryptInfo = encryptInfo
 	}
 
-	// blockStream indicate snapshot<-disk
-	blockStream := jsonutils.QueryBoolean(body, "block_stream", false)
-	autoDeleted := jsonutils.QueryBoolean(body, "auto_deleted", false)
-
-	if !blockStream && !autoDeleted {
-		convertSnapshot, err := body.GetString("convert_snapshot")
-		if err != nil {
-			return nil, httperrors.NewMissingParameterError("convert_snapshot")
-		}
-		params.ConvertSnapshot = convertSnapshot
-	}
-	params.BlockStream = blockStream
 	hostutils.DelayTask(ctx, guestman.GetGuestManager().DeleteSnapshot, params)
 	return nil, nil
 }

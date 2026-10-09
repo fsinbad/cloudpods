@@ -910,6 +910,9 @@ func (manager *SCloudregionManager) ListItemFilter(
 	}
 
 	domainId, err := db.FetchQueryDomain(ctx, userCred, jsonutils.Marshal(query))
+	if err != nil {
+		return nil, err
+	}
 	if len(domainId) > 0 {
 		q = q.In("id", getCloudRegionIdByDomainId(domainId))
 	}
@@ -1329,6 +1332,50 @@ func (self *SCloudregion) StartSyncSkusTask(ctx context.Context, userCred mcclie
 		return errors.Wrapf(err, "CloudRegionSyncSkusTask")
 	}
 	return task.ScheduleRun(nil)
+}
+
+// skipSkuSyncWithoutNetwork 当前 region 没有可用子网时跳过虚拟机、RDS、Redis 套餐同步。
+func (self *SCloudregion) skipSkuSyncWithoutNetwork(ctx context.Context) bool {
+	cnt, err := self.GetNetworkCount(ctx)
+	if err != nil {
+		log.Errorf("region %s(%s) GetNetworkCount fail %s, skip sku sync", self.Name, self.Id, err)
+		return true
+	}
+	if cnt > 0 {
+		return false
+	}
+	log.Debugf("region %s(%s) has no available network, skip sku sync", self.Name, self.Id)
+	return true
+}
+
+// TriggerSkuSyncOnFirstNetwork 公有云区域出现第一个可用子网时触发虚拟机、RDS、Redis 套餐同步。
+func (self *SCloudregion) TriggerSkuSyncOnFirstNetwork(ctx context.Context, userCred mcclient.TokenCredential) {
+	if self.GetCloudEnv() != cloudprovider.CLOUD_ENV_PUBLIC_CLOUD {
+		return
+	}
+	cnt, err := self.GetNetworkCount(ctx)
+	if err != nil {
+		log.Errorf("region %s(%s) GetNetworkCount fail %s", self.Name, self.Id, err)
+		return
+	}
+	if cnt != 1 {
+		return
+	}
+	log.Infof("first available network ready in public region %s(%s), trigger sku sync", self.Name, self.Id)
+	if err := self.StartSyncSkusTask(ctx, userCred, ServerSkuManager.Keyword()); err != nil {
+		log.Errorf("start server sku sync for region %s fail %s", self.Name, err)
+	}
+	driver := self.GetDriver()
+	if driver != nil && driver.IsSupportedElasticcache() {
+		if err := self.StartSyncSkusTask(ctx, userCred, ElasticcacheSkuManager.Keyword()); err != nil {
+			log.Errorf("start elasticcache sku sync for region %s fail %s", self.Name, err)
+		}
+	}
+	if driver != nil && driver.IsSupportedDBInstance() {
+		if err := self.StartSyncSkusTask(ctx, userCred, DBInstanceSkuManager.Keyword()); err != nil {
+			log.Errorf("start dbinstance sku sync for region %s fail %s", self.Name, err)
+		}
+	}
 }
 
 func (self *SCloudregion) GetCloudproviders() ([]SCloudprovider, error) {

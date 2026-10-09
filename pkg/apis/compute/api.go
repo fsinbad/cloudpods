@@ -413,7 +413,10 @@ type ServerConfigs struct {
 	// default: kvm
 	Hypervisor string `json:"hypervisor"`
 
-	// swagger:ignore
+	// specific qemu version, eg: 4.2.0, 10.0.7
+	QemuVersion string `json:"qemu_version"`
+
+	// swagger: ignore
 	Provider string `json:"provider"`
 
 	// 包年包月资源池
@@ -577,6 +580,10 @@ type ServerCreateInput struct {
 	// swagger:ignore
 	// 创建测试数据，不实际创建资源
 	FakeCreate bool `json:"fake_create"`
+
+	// swagger: ignore
+	// 从托管物理机创建虚机记录，不实际创建虚机
+	FakeCreateFromBmImport bool `json:"fake_create_from_bm_import"`
 
 	// swagger:ignore
 	// Deprecated

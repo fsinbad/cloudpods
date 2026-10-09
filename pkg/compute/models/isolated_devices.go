@@ -234,7 +234,7 @@ func (manager *SIsolatedDeviceManager) ValidateCreateData(ctx context.Context,
 
 	// validate reserverd resource
 	// inject default reserverd resource for gpu:
-	if host.HostType == api.HOST_TYPE_KVM && input.SharingMode == api.DEVICE_SHARING_MODE_EXCLUSIVE && input.DevType == api.GPU_TYPE {
+	if host.HostType == api.HOST_TYPE_HYPERVISOR && input.SharingMode == api.DEVICE_SHARING_MODE_EXCLUSIVE && input.DevType == api.GPU_TYPE {
 		defaultCPU := 8        // 8
 		defaultMem := 8192     // 8g
 		defaultStore := 102400 // 100g
@@ -656,8 +656,12 @@ func (manager *SIsolatedDeviceManager) attachHostDeviceToGuestByDesc(
 
 func (manager *SIsolatedDeviceManager) attachSpecificDeviceToGuest(ctx context.Context, guest *SGuest, devConfig *api.IsolatedDeviceConfig, userCred mcclient.TokenCredential) error {
 	devObj, err := manager.FetchById(devConfig.Id)
-	if devObj == nil {
-		return fmt.Errorf("Device %s not found: %s", devConfig.Id, err)
+	if err != nil {
+		if errors.Cause(err) == sql.ErrNoRows {
+			return httperrors.NewResourceNotFoundError2(manager.Keyword(), devConfig.Id)
+		} else {
+			return errors.Wrap(err, "SIsolatedDeviceManager.FetchById")
+		}
 	}
 	dev := devObj.(*SIsolatedDevice)
 	if len(devConfig.DevType) > 0 && devConfig.DevType != dev.DevType {
@@ -1286,7 +1290,9 @@ func (manager *SIsolatedDeviceManager) totalCountQ(
 	hosts := hq.SubQuery()
 	devs := manager.Query().SubQuery()
 	q := devs.Query().Join(hosts, sqlchemy.Equals(devs.Field("host_id"), hosts.Field("id")))
-	q = q.Filter(sqlchemy.IsTrue(hosts.Field("enabled")))
+	// 透传设备 usage 统计全部宿主机（含禁用），与 hosts 而非 enabled_hosts 口径一致。
+	// 禁用宿主机上的 GPU 仍需在 usages/hosts 中展示，调度侧仍只使用启用宿主机。
+	// q = q.Filter(sqlchemy.IsTrue(hosts.Field("enabled")))
 	if len(devType) != 0 {
 		q = q.Filter(sqlchemy.In(devs.Field("dev_type"), devType))
 	}
@@ -1435,10 +1441,12 @@ func (man *SIsolatedDeviceManager) BatchGetModelSpecs(statusCheck bool) (jsonuti
 		if err := rows.Scan(&vendorDeviceId, &m, &t, &s, &nvmeSize, &memorySize, &hostType, &count); err != nil {
 			return nil, errors.Wrap(err, "get model spec scan rows")
 		}
-		vendor := GetVendorByVendorDeviceId(vendorDeviceId)
-		specKeys := man.getSpecKeys(vendor, m, t, s)
-		specKey := GetSpecIdentKey(specKeys)
 		spec := man.getSpecByRows(hostType, vendorDeviceId, m, t, s, &nvmeSize, &memorySize, &count)
+		specKey := GetSpecIdentKey(man.GetSpecIdent(spec))
+		if oldSpec, _ := res.Get(specKey); oldSpec != nil {
+			oldCount, _ := oldSpec.Int("count")
+			spec.Set("count", jsonutils.NewInt(oldCount+int64(count)))
+		}
 		res.Set(specKey, spec)
 	}
 
@@ -1519,15 +1527,19 @@ func (man *SIsolatedDeviceManager) GetSpecIdent(spec *jsonutils.JSONDict) []stri
 	vendor, _ := spec.GetString("vendor")
 	model, _ := spec.GetString("model")
 	sharingMode, _ := spec.GetString("sharing_mode")
-	return man.getSpecKeys(vendor, model, devType, sharingMode)
+	hypervisor, _ := spec.GetString("hypervisor")
+	return man.getSpecKeys(vendor, model, devType, sharingMode, hypervisor)
 }
 
-func (man *SIsolatedDeviceManager) getSpecKeys(vendor, model, devType, sharingMode string) []string {
+func (man *SIsolatedDeviceManager) getSpecKeys(vendor, model, devType, sharingMode, hypervisor string) []string {
 	keys := []string{
 		fmt.Sprintf("type:%s", devType),
 		fmt.Sprintf("vendor:%s", vendor),
 		fmt.Sprintf("model:%s", model),
 		fmt.Sprintf("sharing_mode:%s", sharingMode),
+	}
+	if len(hypervisor) > 0 {
+		keys = append(keys, fmt.Sprintf("hypervisor:%s", hypervisor))
 	}
 	return keys
 }
@@ -1588,12 +1600,14 @@ func (manager *SIsolatedDeviceManager) FetchCustomizeColumns(
 		nguests := guestIds[i]
 		if len(nguests) > 0 {
 			rows[i].Guest = make([]string, len(nguests))
+			rows[i].GuestIds = make([]string, len(nguests))
 			rows[i].GuestStatus = make([]string, len(nguests))
 		}
 
 		for j := range nguests {
 			if guest, ok := guests[nguests[j]]; ok {
 				rows[i].Guest[j] = guest.Name
+				rows[i].GuestIds[j] = guest.Id
 				rows[i].GuestStatus[j] = guest.Status
 			}
 		}
@@ -2496,7 +2510,7 @@ func (dev *SIsolatedDevice) IsKvmExclusiveGPU() bool {
 		return false
 	}
 	host := dev.GetHost()
-	if host.HostType != api.HOST_TYPE_KVM {
+	if host.HostType != api.HOST_TYPE_HYPERVISOR {
 		return false
 	}
 	return true

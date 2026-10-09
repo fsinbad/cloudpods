@@ -403,6 +403,57 @@ func HasHygonDevices(llm *SLLM, sku *SLLMSku) bool {
 	return false
 }
 
+// HasIluvatarDevices reports whether effective devices include Iluvatar GPU.
+func HasIluvatarDevices(llm *SLLM, sku *SLLMSku) bool {
+	devs := GetEffectiveDevices(llm, sku)
+	if devs == nil {
+		return false
+	}
+	for _, d := range *devs {
+		if strings.EqualFold(d.Vendor, "ILUVATAR") {
+			return true
+		}
+		if d.DevType == computeapi.CONTAINER_DEV_ILUVATAR_GPU {
+			return true
+		}
+	}
+	return false
+}
+
+// HasTHeadDevices reports whether effective devices include T-Head PPU.
+func HasTHeadDevices(llm *SLLM, sku *SLLMSku) bool {
+	devs := GetEffectiveDevices(llm, sku)
+	if devs == nil {
+		return false
+	}
+	for _, d := range *devs {
+		if strings.EqualFold(d.Vendor, "THEAD") {
+			return true
+		}
+		if d.DevType == computeapi.CONTAINER_DEV_THEAD_PPU {
+			return true
+		}
+	}
+	return false
+}
+
+// HasKunlunxinDevices reports whether effective devices include Kunlunxin XPU.
+func HasKunlunxinDevices(llm *SLLM, sku *SLLMSku) bool {
+	devs := GetEffectiveDevices(llm, sku)
+	if devs == nil {
+		return false
+	}
+	for _, d := range *devs {
+		if strings.EqualFold(d.Vendor, "KUNLUNXIN") {
+			return true
+		}
+		if d.DevType == computeapi.CONTAINER_DEV_KUNLUNXIN_XPU {
+			return true
+		}
+	}
+	return false
+}
+
 // GetEffectiveHostPaths returns the host_paths to apply with llm's override taking priority over sku.
 func GetEffectiveHostPaths(llm *SLLM, sku *SLLMSku) *api.HostPaths {
 	var llmBase *SLLMBase
@@ -728,6 +779,48 @@ func AppendLLMSkuVolumeMounts(containers []*computeapi.PodContainerCreateInput, 
 		containers[idx].VolumeMounts = append(containers[idx].VolumeMounts, GetDiskVolumeMounts(skuBase.Volumes, idx, postOverlays)...)
 		containers[idx].VolumeMounts = append(containers[idx].VolumeMounts, GetHostPathVolumeMounts(effectiveHostPaths, idx)...)
 	}
+}
+
+// AppendLLMSkuEnvs merges SKU envs into the primary container (index 0).
+// Same-key SKU values override driver defaults. Empty keys are ignored.
+func AppendLLMSkuEnvs(containers []*computeapi.PodContainerCreateInput, skuBase *SLLMSkuBase) {
+	if skuBase == nil || skuBase.Envs == nil || skuBase.Envs.IsZero() {
+		return
+	}
+	if len(containers) == 0 || containers[0] == nil {
+		return
+	}
+	containers[0].Envs = mergeContainerEnvs(containers[0].Envs, *skuBase.Envs)
+}
+
+func mergeContainerEnvs(existing []*apis.ContainerKeyValue, skuEnvs api.Envs) []*apis.ContainerKeyValue {
+	indexByKey := make(map[string]int, len(existing))
+	out := make([]*apis.ContainerKeyValue, 0, len(existing)+len(skuEnvs))
+	for _, e := range existing {
+		if e == nil {
+			continue
+		}
+		key := strings.TrimSpace(e.Key)
+		if key == "" {
+			continue
+		}
+		indexByKey[key] = len(out)
+		out = append(out, e)
+	}
+	for _, e := range skuEnvs {
+		key := strings.TrimSpace(e.Key)
+		if key == "" {
+			continue
+		}
+		kv := &apis.ContainerKeyValue{Key: key, Value: e.Value}
+		if idx, ok := indexByKey[key]; ok {
+			out[idx] = kv
+			continue
+		}
+		indexByKey[key] = len(out)
+		out = append(out, kv)
+	}
+	return out
 }
 
 // 取消自动删除

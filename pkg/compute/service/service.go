@@ -176,12 +176,8 @@ func startMasterTasks(opts *options.ComputeOptions, dbOpts *common_options.DBOpt
 		cron := cronman.InitCronJobManager(true, options.Options.CronJobWorkerCount, options.Options.TimeZone)
 		cron.AddJobAtIntervals("CleanPendingDeleteServers", time.Duration(opts.PendingDeleteCheckSeconds)*time.Second, models.GuestManager.CleanPendingDeleteServers)
 		cron.AddJobAtIntervals("CleanPendingDeleteDisks", time.Duration(opts.PendingDeleteCheckSeconds)*time.Second, models.DiskManager.CleanPendingDeleteDisks)
-		if opts.PrepaidExpireCheck {
-			cron.AddJobAtIntervals("CleanExpiredPrepaidServers", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.GuestManager.DeleteExpiredPrepaidServers)
-		}
-		if opts.PrepaidAutoRenew {
-			cron.AddJobAtIntervals("AutoRenewPrepaidServers", time.Duration(opts.PrepaidAutoRenewHours)*time.Hour, models.GuestManager.AutoRenewPrepaidServer)
-		}
+		cron.AddJobAtIntervals("CleanExpiredPrepaidServers", 10*time.Minute, models.GuestManager.DeleteExpiredPrepaidServers)
+		cron.AddJobAtIntervals("AutoRenewPrepaidServers", time.Duration(opts.PrepaidAutoRenewHours)*time.Hour, models.GuestManager.AutoRenewPrepaidServer)
 
 		cron.AddJobAtIntervals("CleanExpiredPostpaidElasticCaches", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.ElasticcacheManager.DeleteExpiredPostpaids)
 		cron.AddJobAtIntervals("CleanExpiredPostpaidDBInstances", time.Duration(opts.PrepaidExpireCheckSeconds)*time.Second, models.DBInstanceManager.DeleteExpiredPostpaids)
@@ -225,7 +221,7 @@ func startMasterTasks(opts *options.ComputeOptions, dbOpts *common_options.DBOpt
 
 		cron.AddJobEveryFewHour("InspectAllTemplate", 1, 0, 0, models.GuestTemplateManager.InspectAllTemplate, true)
 
-		cron.AddJobEveryFewHour("CheckBillingResourceExpireAt", opts.ExpiredReleaseNotifyHour, 0, 0, models.CheckBillingResourceExpireAt, false)
+		cron.AddJobEveryFewHour("CheckBillingResourceExpireAt", opts.ExpiredReleaseNotifyHour, 0, 0, models.CheckBillingResourceExpireAt, true)
 		cron.AddJobEveryFewDays(
 			"CleanRecycleDiskFiles", 1, 3, 0, 0, models.StoragesCleanRecycleDiskfiles, false)
 

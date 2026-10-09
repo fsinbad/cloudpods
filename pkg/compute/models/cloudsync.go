@@ -161,19 +161,22 @@ func syncRegionSkus(ctx context.Context, userCred mcclient.TokenCredential, loca
 		return
 	}
 
-	cnt, err := ServerSkuManager.GetSkuCountByRegion(regionId)
-	if err != nil {
-		log.Errorf("GetSkuCountByRegion fail %s", err)
-		return
+	skipSku := localRegion.skipSkuSyncWithoutNetwork(ctx)
+	if !skipSku {
+		cnt, err := ServerSkuManager.GetSkuCountByRegion(regionId)
+		if err != nil {
+			log.Errorf("GetSkuCountByRegion fail %s", err)
+			return
+		}
+
+		if cnt == 0 {
+			// 提前同步instance type.如果同步失败可能导致vm 内存显示为0
+			localRegion.StartSyncSkusTask(ctx, userCred, ServerSkuManager.Keyword())
+		}
 	}
 
-	if cnt == 0 {
-		// 提前同步instance type.如果同步失败可能导致vm 内存显示为0
-		localRegion.StartSyncSkusTask(ctx, userCred, ServerSkuManager.Keyword())
-	}
-
-	if localRegion.GetDriver().IsSupportedElasticcache() {
-		cnt, err = ElasticcacheSkuManager.GetSkuCountByRegion(regionId)
+	if localRegion.GetDriver().IsSupportedElasticcache() && !skipSku {
+		cnt, err := ElasticcacheSkuManager.GetSkuCountByRegion(regionId)
 		if err != nil {
 			log.Errorf("ElasticcacheSkuManager.GetSkuCountByRegion fail %s", err)
 			return
@@ -184,8 +187,8 @@ func syncRegionSkus(ctx context.Context, userCred mcclient.TokenCredential, loca
 		}
 	}
 
-	if localRegion.GetDriver().IsSupportedDBInstance() {
-		cnt, err = DBInstanceSkuManager.GetSkuCountByRegion(regionId)
+	if localRegion.GetDriver().IsSupportedDBInstance() && !skipSku {
+		cnt, err := DBInstanceSkuManager.GetSkuCountByRegion(regionId)
 		if err != nil {
 			log.Errorf("DBInstanceSkuManager.GetSkuCountByRegion fail %s", err)
 			return
@@ -506,6 +509,42 @@ func syncRegionSecGroup(
 
 	msg := result.Result()
 	notes := fmt.Sprintf("SyncSecurityGroup for region %s provider %s result: %s", localRegion.Name, provider.Name, msg)
+	log.Infof("%s", notes)
+	provider.SyncError(result, notes, userCred)
+	if result.IsError() {
+		return
+	}
+}
+
+func syncRegionIpSets(
+	ctx context.Context,
+	userCred mcclient.TokenCredential,
+	syncResults SSyncResultSet,
+	provider *SCloudprovider,
+	localRegion *SCloudregion,
+	remoteRegion cloudprovider.ICloudRegion,
+	syncRange *SSyncRange,
+) {
+	ipSets, err := func() ([]cloudprovider.ICloudIpSet, error) {
+		defer syncResults.AddRequestCost(IpSetManager)()
+		return remoteRegion.GetIIpSets()
+	}()
+	if err != nil {
+		if errors.Cause(err) == cloudprovider.ErrNotImplemented || errors.Cause(err) == cloudprovider.ErrNotSupported {
+			return
+		}
+		msg := fmt.Sprintf("GetIIpSets for region %s provider %s failed %s", localRegion.Name, provider.Name, err)
+		log.Errorf("%s", msg)
+		return
+	}
+
+	result := func() compare.SyncResult {
+		defer syncResults.AddSqlCost(IpSetManager)()
+		return localRegion.SyncIpSets(ctx, userCred, provider, ipSets, syncRange.Xor)
+	}()
+	syncResults.Add(IpSetManager, result)
+
+	notes := fmt.Sprintf("SyncIpSets for region %s provider %s result: %s", localRegion.Name, provider.Name, result.Result())
 	log.Infof("%s", notes)
 	provider.SyncError(result, notes, userCred)
 	if result.IsError() {
@@ -1507,6 +1546,9 @@ func syncSkusFromPrivateCloud(
 	remoteRegion cloudprovider.ICloudRegion,
 	xor bool,
 ) {
+	if region.skipSkuSyncWithoutNetwork(ctx) {
+		return
+	}
 	skus, err := remoteRegion.GetISkus()
 	if err != nil {
 		msg := fmt.Sprintf("GetISkus for region %s(%s) failed %v", region.Name, region.Id, err)
@@ -1578,6 +1620,9 @@ func syncRegionDBInstances(
 }
 
 func syncDBInstanceSkus(ctx context.Context, userCred mcclient.TokenCredential, syncResults SSyncResultSet, provider *SCloudprovider, localRegion *SCloudregion, remoteRegion cloudprovider.ICloudRegion, syncRange *SSyncRange) {
+	if localRegion.skipSkuSyncWithoutNetwork(ctx) {
+		return
+	}
 	skus, err := func() ([]cloudprovider.ICloudDBInstanceSku, error) {
 		defer syncResults.AddRequestCost(DBInstanceSkuManager)()
 		return remoteRegion.GetIDBInstanceSkus()
@@ -1636,6 +1681,9 @@ func syncNATSkus(ctx context.Context, userCred mcclient.TokenCredential, syncRes
 }
 
 func syncCacheSkus(ctx context.Context, userCred mcclient.TokenCredential, syncResults SSyncResultSet, provider *SCloudprovider, localRegion *SCloudregion, remoteRegion cloudprovider.ICloudRegion, syncRange *SSyncRange) {
+	if localRegion.skipSkuSyncWithoutNetwork(ctx) {
+		return
+	}
 	skus, err := func() ([]cloudprovider.ICloudElasticcacheSku, error) {
 		defer syncResults.AddRequestCost(ElasticcacheSkuManager)()
 		return remoteRegion.GetIElasticcacheSkus()
@@ -2488,6 +2536,9 @@ func syncPublicCloudProviderInfo(
 				syncRegionEips(ctx, userCred, syncResults, provider, localRegion, remoteRegion, syncRange)
 			}
 
+			if syncRange.IsNotSkipSyncResource(IpSetManager) {
+				syncRegionIpSets(ctx, userCred, syncResults, provider, localRegion, remoteRegion, syncRange)
+			}
 			if syncRange.IsNotSkipSyncResource(SecurityGroupManager) {
 				syncRegionSecGroup(ctx, userCred, syncResults, provider, localRegion, remoteRegion, syncRange)
 			}
@@ -3033,6 +3084,13 @@ func SyncCloudproviderResources(ctx context.Context, userCred mcclient.TokenCred
 		syncSSLCertificates(ctx, userCred, SSyncResultSet{}, provider, driver, syncRange.Xor)
 	}
 
+	if syncRange.IsNotSkipSyncResource(IpSetManager) {
+		err = syncProviderIpSets(ctx, userCred, SSyncResultSet{}, provider, driver, syncRange.Xor)
+		if err != nil {
+			log.Errorf("syncProviderIpSets error: %v", err)
+		}
+	}
+
 	return nil
 }
 
@@ -3152,6 +3210,29 @@ func syncSSLCertificates(ctx context.Context, userCred mcclient.TokenCredential,
 
 	result := provider.SyncSSLCertificates(ctx, userCred, iEss)
 	notes := fmt.Sprintf("SyncSSLCertificates for provider %s result: %s", provider.Name, result.Result())
+	log.Infof("%s", notes)
+	provider.SyncError(result, notes, userCred)
+	return nil
+}
+
+func syncProviderIpSets(ctx context.Context, userCred mcclient.TokenCredential, syncResults SSyncResultSet, provider *SCloudprovider, driver cloudprovider.ICloudProvider, xor bool) error {
+	ipSets, err := func() ([]cloudprovider.ICloudIpSet, error) {
+		defer syncResults.AddRequestCost(IpSetManager)()
+		return driver.GetIIpSets()
+	}()
+	if err != nil {
+		if errors.Cause(err) == cloudprovider.ErrNotImplemented || errors.Cause(err) == cloudprovider.ErrNotSupported {
+			return nil
+		}
+		return err
+	}
+
+	result := func() compare.SyncResult {
+		defer syncResults.AddSqlCost(IpSetManager)()
+		return provider.SyncIpSets(ctx, userCred, ipSets, xor)
+	}()
+	syncResults.Add(IpSetManager, result)
+	notes := fmt.Sprintf("Sync ip sets for provider %s result: %s", provider.Name, result.Result())
 	log.Infof("%s", notes)
 	provider.SyncError(result, notes, userCred)
 	return nil

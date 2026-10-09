@@ -58,6 +58,12 @@ func (deleteTask *BaseGuestDeleteTask) OnInit(ctx context.Context, obj db.IStand
 		deleteTask.OnGuestStopComplete(ctx, guest, data)
 		return
 	}
+	purgeBmImportServerFakeDelete := host.IsImport && options.Options.BaremetalPrepareServerFakeDelete
+	if purgeBmImportServerFakeDelete && options.Options.BaremetalPrepareServerFakeDeleteKeepRunning {
+		deleteTask.OnGuestStopComplete(ctx, guest, data)
+		return
+	}
+
 	if len(guest.BackupHostId) > 0 {
 		deleteTask.SetStage("OnMasterHostStopGuestComplete", nil)
 		if err := drv.RequestStopGuestForDelete(ctx, guest, nil, deleteTask); err != nil {
@@ -92,16 +98,7 @@ func (deleteTask *BaseGuestDeleteTask) OnMasterHostStopGuestCompleteFailed(ctx c
 	deleteTask.OnGuestStopComplete(ctx, guest, nil) // ignore stop error
 }
 
-func (deleteTask *BaseGuestDeleteTask) StartDeleteGuestSnapshots(ctx context.Context, guest *models.SGuest) {
-	guest.StartDeleteGuestSnapshots(ctx, deleteTask.UserCred, deleteTask.GetTaskId())
-}
-
 func (deleteTask *BaseGuestDeleteTask) OnGuestStopComplete(ctx context.Context, guest *models.SGuest, data jsonutils.JSONObject) {
-	if jsonutils.QueryBoolean(deleteTask.Params, "delete_snapshots", false) {
-		deleteTask.SetStage("OnStartEipDissociate", nil)
-		guest.StartDeleteGuestSnapshots(ctx, deleteTask.UserCred, deleteTask.Id)
-		return
-	}
 	deleteTask.OnStartEipDissociate(ctx, guest, data)
 }
 
@@ -228,6 +225,7 @@ func (deleteTask *BaseGuestDeleteTask) OnSyncConfigComplete(ctx context.Context,
 		log.Debugf("XXXXXXX Do guest pending delete... XXXXXXX")
 		// pending detach
 		guest.PendingDetachScalingGroup()
+		guest.PendingDeleteSnapshots(ctx, deleteTask.UserCred)
 		guestStatus, _ := deleteTask.Params.GetString("guest_status")
 		if !utils.IsInStringArray(guestStatus, []string{
 			api.VM_SCHEDULE_FAILED, api.VM_NETWORK_FAILED,
@@ -255,7 +253,7 @@ func (deleteTask *BaseGuestDeleteTask) doStartDeleteGuest(ctx context.Context, o
 	guest := obj.(*models.SGuest)
 	guest.SetStatus(ctx, deleteTask.UserCred, api.VM_DELETING, "delete server after stop")
 	db.OpsLog.LogEvent(guest, db.ACT_DELOCATING, guest.GetShortDesc(ctx), deleteTask.UserCred)
-	deleteTask.StartDeleteGuest(ctx, guest)
+	deleteTask.startDeleteGuestSnapshots(ctx, guest)
 }
 
 func (deleteTask *BaseGuestDeleteTask) StartPendingDeleteGuest(ctx context.Context, guest *models.SGuest) {
@@ -272,7 +270,7 @@ func (deleteTask *BaseGuestDeleteTask) OnPendingDeleteCompleteFailed(ctx context
 	deleteTask.OnPendingDeleteComplete(ctx, obj, nil)
 }
 
-func (deleteTask *BaseGuestDeleteTask) StartDeleteGuest(ctx context.Context, guest *models.SGuest) {
+func (deleteTask *BaseGuestDeleteTask) startDeleteGuestDisks(ctx context.Context, guest *models.SGuest) {
 	// Temporary storageids to sync capacityUsed after delete
 	{
 		storages, _ := guest.GetStorages()
@@ -292,6 +290,26 @@ func (deleteTask *BaseGuestDeleteTask) StartDeleteGuest(ctx context.Context, gue
 	drv.RequestDetachDisksFromGuestForDelete(ctx, guest, deleteTask)
 }
 
+func (deleteTask *BaseGuestDeleteTask) startDeleteGuestSnapshots(ctx context.Context, guest *models.SGuest) {
+	deletePendingSnapshots := true
+	if jsonutils.QueryBoolean(deleteTask.Params, "delete_snapshots", false) {
+		deletePendingSnapshots = false
+	}
+	deleteTask.Params.Set("snapshot_delete_no_sync_status", jsonutils.JSONTrue)
+	deleteTask.SetStage("OnDeleteSnapshots", nil)
+	guest.StartDeleteGuestSnapshots(ctx, deleteTask.UserCred, deleteTask.Id, deletePendingSnapshots)
+}
+
+func (deleteTask *BaseGuestDeleteTask) OnDeleteSnapshots(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
+	guest := obj.(*models.SGuest)
+	guest.SetStatus(ctx, deleteTask.UserCred, api.VM_DELETING, "delete server after stop")
+	deleteTask.startDeleteGuestDisks(ctx, guest)
+}
+
+func (deleteTask *BaseGuestDeleteTask) OnDeleteSnapshotsFailed(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
+	deleteTask.OnGuestDeleteFailed(ctx, obj, data)
+}
+
 func (deleteTask *BaseGuestDeleteTask) OnGuestDetachDisksComplete(ctx context.Context, obj db.IStandaloneModel, data jsonutils.JSONObject) {
 	guest := obj.(*models.SGuest)
 	deleteTask.DoDeleteGuest(ctx, guest)
@@ -304,6 +322,7 @@ func (deleteTask *BaseGuestDeleteTask) OnGuestDetachDisksCompleteFailed(ctx cont
 func (deleteTask *BaseGuestDeleteTask) DoDeleteGuest(ctx context.Context, guest *models.SGuest) {
 	models.IsolatedDeviceManager.ReleaseDevicesOfGuest(ctx, guest, deleteTask.UserCred)
 	host, _ := guest.GetHost()
+	purgeBmImportServerFakeDelete := host.IsImport && options.Options.BaremetalPrepareServerFakeDelete
 	if guest.IsPrepaidRecycle() {
 		err := host.BorrowIpAddrsFromGuest(ctx, deleteTask.UserCred, guest)
 		if err != nil {
@@ -315,6 +334,17 @@ func (deleteTask *BaseGuestDeleteTask) DoDeleteGuest(ctx context.Context, guest 
 		deleteTask.OnGuestDeleteComplete(ctx, guest, nil)
 	} else if (host == nil || !host.GetEnabled()) && jsonutils.QueryBoolean(deleteTask.Params, "purge", false) {
 		deleteTask.OnGuestDeleteComplete(ctx, guest, nil)
+	} else if purgeBmImportServerFakeDelete {
+		drv, _ := guest.GetDriver()
+		if drv != nil {
+			deleteTask.SetStage("OnGuestDeleteComplete", nil)
+			if err := drv.RequestUndeployGuestOnHost(ctx, guest, host, deleteTask); err != nil {
+				deleteTask.OnGuestDeleteFailed(ctx, guest, jsonutils.NewString(err.Error()))
+				return
+			}
+		} else {
+			deleteTask.OnGuestDeleteComplete(ctx, guest, nil)
+		}
 	} else {
 		deleteTask.SetStage("OnGuestDeleteComplete", nil)
 		guest.StartUndeployGuestTask(ctx, deleteTask.UserCred, deleteTask.GetTaskId(), "")

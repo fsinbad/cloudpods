@@ -155,6 +155,7 @@ func (h *AuthHandlers) GetRegionsResponse(ctx context.Context, w http.ResponseWr
 		Idps:              []agapi.SIdp{},
 		EncryptPasswd:     true,
 		ApiServer:         options.Options.ApiServer,
+		CorsHosts:         options.Options.CorsHosts,
 	}
 
 	s := auth.GetAdminSession(ctx, regions[0])
@@ -978,7 +979,7 @@ func getUserInfo2(s *mcclient.ClientSession, uid string, pid string, loginIp str
 		data.Add(jsonutils.NewString(projDomainName), "projectDomain")
 		data.Add(jsonutils.NewString(projDomainId), "projectDomainId")
 
-		pmeta, err := projInfo.Get("metadata")
+		pmeta, _ := projInfo.Get("metadata")
 		if pmeta != nil {
 			data.Add(pmeta, "project_meta")
 		}

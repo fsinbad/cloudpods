@@ -48,43 +48,47 @@ type ContainerDeleteOptions struct {
 }
 
 type ContainerCreateCommonOptions struct {
-	IMAGE             string   `help:"Image of container" json:"image"`
-	ImageCredentialId string   `help:"Image credential id" json:"image_credential_id"`
-	Command           []string `help:"Command to execute (i.e., entrypoint for docker)" json:"command"`
-	Args              []string `help:"Args for the Command (i.e. command for docker)" json:"args"`
-	WorkingDir        string   `help:"Current working directory of the command" json:"working_dir"`
-	Env               []string `help:"List of environment variable to set in the container and the format is: <key>=<value>"`
-	RootFs            string   `help:"Root filesystem of the container, e.g.: disk_index=<disk_number>,disk_id=<disk_id>"`
-	VolumeMount       []string `help:"Volume mount of the container and the format is: name=<val>,mount_path=<container_path>,readonly=<true_or_false>,case_insensitive_paths=p1,p2,disk_index=<disk_number>,disk_id=<disk_id>"`
-	Device            []string `help:"Host device: <host_path>:<container_path>:<permissions>, e.g.: /dev/snd:/dev/snd:rwm"`
-	Privileged        bool     `help:"Privileged mode"`
-	Caps              string   `help:"Container capabilities, e.g.: SETPCAP,AUDIT_WRITE,SYS_CHROOT,CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID,SYSLOG,SYS_ADMIN,WAKE_ALARM,SYS_PTRACE,BLOCK_SUSPEND,MKNOD,KILL,SYS_RESOURCE,NET_RAW,NET_ADMIN,NET_BIND_SERVICE,SYS_NICE"`
-	DropCaps          string   `help:"Container dropped capabilities, split by ','"`
-	EnableLxcfs       bool     `help:"Enable lxcfs"`
-	PostStartExec     string   `help:"Post started execution command"`
-	CgroupDeviceAllow []string `help:"Cgroup devices.allow, e.g.: 'c 13:* rwm'"`
-	SimulateCpu       bool     `help:"Simulating /sys/devices/system/cpu files"`
-	ShmSizeMb         int      `help:"Shm size MB"`
-	Uid               int64    `help:"UID of container" default:"0"`
-	Gid               int64    `help:"GID of container" default:"0"`
-	DisableNoNewPrivs bool     `help:"Disable no_new_privs flag of the container"`
-	Apparmor          string   `help:"Apparmor profile for container"`
+	IMAGE                    string   `help:"Image of container" json:"image"`
+	ImageCredentialId        string   `help:"Image credential id" json:"image_credential_id"`
+	Command                  []string `help:"Command to execute (i.e., entrypoint for docker)" json:"command"`
+	Args                     []string `help:"Args for the Command (i.e. command for docker)" json:"args"`
+	WorkingDir               string   `help:"Current working directory of the command" json:"working_dir"`
+	Env                      []string `help:"List of environment variable to set in the container and the format is: <key>=<value>"`
+	RootFs                   string   `help:"Root filesystem of the container, e.g.: disk_index=<disk_number>,disk_id=<disk_id>"`
+	VolumeMount              []string `help:"Volume mount of the container and the format is: name=<val>,mount_path=<container_path>,readonly=<true_or_false>,case_insensitive_paths=p1,p2,disk_index=<disk_number>,disk_id=<disk_id>"`
+	Device                   []string `help:"Host device: <host_path>:<container_path>:<permissions>, e.g.: /dev/snd:/dev/snd:rwm"`
+	Privileged               bool     `help:"Privileged mode"`
+	Caps                     string   `help:"Container capabilities, e.g.: SETPCAP,AUDIT_WRITE,SYS_CHROOT,CHOWN,DAC_OVERRIDE,FOWNER,SETGID,SETUID,SYSLOG,SYS_ADMIN,WAKE_ALARM,SYS_PTRACE,BLOCK_SUSPEND,MKNOD,KILL,SYS_RESOURCE,NET_RAW,NET_ADMIN,NET_BIND_SERVICE,SYS_NICE"`
+	DropCaps                 string   `help:"Container dropped capabilities, split by ','"`
+	EnableLxcfs              bool     `help:"Enable lxcfs"`
+	PostStartExec            string   `help:"Post started execution command"`
+	CgroupDeviceAllow        []string `help:"Cgroup devices.allow, e.g.: 'c 13:* rwm'"`
+	DisableCgroupCpuLimit    bool     `help:"Do not set CPU cgroup CFS quota"`
+	DisableCgroupMemoryLimit bool     `help:"Do not set memory cgroup hard limit"`
+	SimulateCpu              bool     `help:"Simulating /sys/devices/system/cpu files"`
+	ShmSizeMb                int      `help:"Shm size MB"`
+	Uid                      int64    `help:"UID of container" default:"0"`
+	Gid                      int64    `help:"GID of container" default:"0"`
+	DisableNoNewPrivs        bool     `help:"Disable no_new_privs flag of the container"`
+	Apparmor                 string   `help:"Apparmor profile for container"`
 }
 
 func (o ContainerCreateCommonOptions) getCreateSpec() (*computeapi.ContainerSpec, error) {
 	req := &computeapi.ContainerSpec{
 		ContainerSpec: apis.ContainerSpec{
-			Image:              o.IMAGE,
-			ImageCredentialId:  o.ImageCredentialId,
-			Command:            o.Command,
-			Args:               o.Args,
-			WorkingDir:         o.WorkingDir,
-			EnableLxcfs:        o.EnableLxcfs,
-			Privileged:         o.Privileged,
-			Capabilities:       &apis.ContainerCapability{},
-			CgroupDevicesAllow: o.CgroupDeviceAllow,
-			SimulateCpu:        o.SimulateCpu,
-			DisableNoNewPrivs:  o.DisableNoNewPrivs,
+			Image:                    o.IMAGE,
+			ImageCredentialId:        o.ImageCredentialId,
+			Command:                  o.Command,
+			Args:                     o.Args,
+			WorkingDir:               o.WorkingDir,
+			EnableLxcfs:              o.EnableLxcfs,
+			Privileged:               o.Privileged,
+			Capabilities:             &apis.ContainerCapability{},
+			CgroupDevicesAllow:       o.CgroupDeviceAllow,
+			DisableCgroupCpuLimit:    o.DisableCgroupCpuLimit,
+			DisableCgroupMemoryLimit: o.DisableCgroupMemoryLimit,
+			SimulateCpu:              o.SimulateCpu,
+			DisableNoNewPrivs:        o.DisableNoNewPrivs,
 			SecurityContext: &apis.ContainerSecurityContext{
 				RunAsUser:  nil,
 				RunAsGroup: nil,
@@ -483,7 +487,7 @@ func (o *ContainerLogOptions) ToAPIInput() (*computeapi.PodLogOptions, error) {
 
 type ContainerCommitOptions struct {
 	ServerIdOptions
-	RegistryId               string `help:"Registry ID from kubeserver"`
+	RegistryId               string `help:"Container registry ID from glance"`
 	ImageName                string `help:"Image name"`
 	Tag                      string `help:"Tag"`
 	ExternalRegistryUrl      string `help:"External registry URL, e.g.: registry.cn-beijing.aliyuncs.com/yunionio"`
@@ -496,18 +500,15 @@ func (o *ContainerCommitOptions) Params() (jsonutils.JSONObject, error) {
 		RegistryId: o.RegistryId,
 		ImageName:  o.ImageName,
 		Tag:        o.Tag,
-		ExternalRegistry: &computeapi.ContainerCommitExternalRegistry{
-			Auth: &apis.ContainerPullImageAuthConfig{},
-		},
 	}
-	if o.ExternalRegistryUrl != "" {
-		input.ExternalRegistry.Url = o.ExternalRegistryUrl
-	}
-	if o.ExternalRegistryUsername != "" {
-		input.ExternalRegistry.Auth.Username = o.ExternalRegistryUsername
-	}
-	if o.ExternalRegistryPassword != "" {
-		input.ExternalRegistry.Auth.Password = o.ExternalRegistryPassword
+	if o.ExternalRegistryUrl != "" || o.ExternalRegistryUsername != "" || o.ExternalRegistryPassword != "" {
+		input.ExternalRegistry = &computeapi.ContainerCommitExternalRegistry{
+			Url: o.ExternalRegistryUrl,
+			Auth: &apis.ContainerPullImageAuthConfig{
+				Username: o.ExternalRegistryUsername,
+				Password: o.ExternalRegistryPassword,
+			},
+		}
 	}
 	return jsonutils.Marshal(input), nil
 }

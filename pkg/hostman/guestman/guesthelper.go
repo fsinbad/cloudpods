@@ -43,6 +43,17 @@ type SBaseParams struct {
 	Body jsonutils.JSONObject
 }
 
+// SGuestSetPortMapping 设置虚机网卡端口映射的宿主机侧参数
+type SGuestSetPortMapping struct {
+	Sid   string
+	Input *compute.ServerSetPortMappingInput
+}
+
+type SGuestStopParams struct {
+	IsForce bool
+	Timeout int64
+}
+
 type SGuestDeploy struct {
 	UserCred mcclient.TokenCredential
 
@@ -152,12 +163,11 @@ type SDiskBackup struct {
 }
 
 type SDeleteDiskSnapshot struct {
-	Sid             string
-	DeleteSnapshot  string
-	Disk            storageman.IDisk
-	ConvertSnapshot string
-	BlockStream     bool
-	EncryptInfo     apis.SEncryptInfo
+	Sid            string
+	DeleteSnapshot string
+	SnapshotIds    []string
+	Disk           storageman.IDisk
+	EncryptInfo    apis.SEncryptInfo
 
 	TotalDeleteSnapshotCount int
 	DeletedSnapshotCount     int

@@ -142,6 +142,9 @@ type ServerListInput struct {
 	BindingSnapshotpolicy *bool `json:"binding_snapshotpolicy"`
 	// 根据虚机关联的磁盘是否绑定快照策略过滤
 	BindingDisksSnapshotpolicy *bool `json:"binding_disks_snapshotpolicy"`
+
+	// 根据秘钥对ID过滤
+	KeypairId []string `json:"keypair_id"`
 }
 
 // 主机快照策略绑定/设置接口入参
@@ -223,7 +226,8 @@ type ServerDetails struct {
 	// 是否可以回收
 	CanRecycle bool `json:"can_recycle"`
 
-	// 自动释放时间
+	// 自动释放时间, 若虚拟机在到期后未续费, 则会在AutoDeleteAt时间后自动释放，或在回收站时自动释放
+	// example: 2026-09-29T10:00:00Z
 	AutoDeleteAt time.Time `json:"auto_delete_at"`
 	// 磁盘数量
 	DiskCount int `json:"disk_count"`
@@ -517,6 +521,28 @@ type ConvertToKvmInput struct {
 	// dest guest network configs
 	Networks []*NetworkConfig `json:"networks"`
 
+	// dest guest disk storage configs; length must equal guest disks when set
+	// support per-disk backend/storage/medium/schedtags; overrides sys/data disk prefers
+	Disks []*DiskConfig `json:"disks"`
+
+	// Prefer disk backend for system disk, e.g. local/lvm/slvm/nfs/rbd
+	SysDiskBackend string `json:"sys_disk_backend"`
+	// Prefer storage id or name for system disk
+	SysPreferStorage string `json:"sys_prefer_storage"`
+	// Prefer medium for system disk, e.g. rotate/ssd/hybrid
+	SysDiskMedium string `json:"sys_disk_medium"`
+	// Prefer disk schedtags for system disk
+	SysDiskSchedtags []*SchedtagConfig `json:"sys_disk_schedtags"`
+
+	// Prefer disk backend for data disks, e.g. local/lvm/slvm/nfs/rbd
+	DataDiskBackend string `json:"data_disk_backend"`
+	// Prefer storage id or name for data disks
+	DataPreferStorage string `json:"data_prefer_storage"`
+	// Prefer medium for data disks, e.g. rotate/ssd/hybrid
+	DataDiskMedium string `json:"data_disk_medium"`
+	// Prefer disk schedtags for data disks
+	DataDiskSchedtags []*SchedtagConfig `json:"data_disk_schedtags"`
+
 	// deploy telegraf after convert
 	DeployTelegraf bool `json:"deploy_telegraf"`
 }
@@ -690,13 +716,21 @@ type ServerStopInput struct {
 	// 是否强制关机
 	IsForce bool `json:"is_force"`
 
-	// 关机等待时间，如果是强制关机，则等待时间为0，如果不设置，默认为30秒
-	TimeoutSecs int `json:"timeout_secs"`
+	// 关机等待时间，如果不是强制关机，超过关机时间可能关机失败。linux默认则等待时间为60秒，windows 120秒
+	TimeoutSecs *int `json:"timeout_secs"`
 
 	// 是否关机停止计费, 若平台不支持停止计费，此参数无作用
 	// 若包年包月机器关机设置此参数，则先转换计费模式到按量计费，再关机不收费
 	// 目前仅阿里云，腾讯云此参数生效
 	StopCharging bool `json:"stop_charging"`
+}
+
+type ServerRestartInput struct {
+	// 是否强制关机
+	IsForce bool `json:"is_force"`
+
+	// 关机等待时间，如果不是强制关机，超过关机时间可能关机失败。linux默认则等待时间为60秒，windows 120秒
+	TimeoutSecs *int `json:"timeout_secs"`
 }
 
 type ServerSaveImageInput struct {
@@ -1307,6 +1341,12 @@ type ServerSetPasswordInput struct {
 	AutoStart     bool `json:"auto_start"`
 }
 
+type ServerSetIsoInput struct {
+	CdromOrdinal int64  `json:"cdrom_ordinal"`
+	ImageId      string `json:"image_id"`
+	BootIndex    *int8  `json:"boot_index"`
+}
+
 type ServerInsertVfdInput struct {
 	FloppyOrdinal int64  `json:"floppy_ordinal"`
 	ImageId       string `json:"image_id"`
@@ -1489,6 +1529,13 @@ type ServerChangeBandwidthInput struct {
 	NoSync *bool `json:"no_sync"`
 }
 
+// ServerSetPortMappingInput 设置服务器指定网卡的端口映射
+type ServerSetPortMappingInput struct {
+	ServerNetworkInfo
+	// 端口映射规则列表；传空数组表示清空该网卡的所有端口映射
+	PortMappings GuestPortMappings `json:"port_mappings"`
+}
+
 type ServerChangeConfigSpecs struct {
 	CpuSockets    int    `json:"cpu_sockets"`
 	VcpuCount     int    `json:"vcpu_count"`
@@ -1615,6 +1662,17 @@ type ServerAttachIsolatedDeviceInput struct {
 	ServerAttachIsolatedDeviceBase
 	Device string `json:"device"`
 	Model  string `json:"model"`
+}
+
+type ServerDetachIsolatedDeviceInputBase struct {
+	Device string `json:"device"`
+	Index  *int   `json:"index"`
+}
+type ServerDetachIsolatedDeviceInput struct {
+	Devices   []ServerDetachIsolatedDeviceInputBase `json:"devices"`
+	IsForce   bool                                  `json:"is_force"`
+	DetachAll bool                                  `json:"detach_all"`
+	AutoStart bool                                  `json:"auto_start"`
 }
 
 type ServerChangeBillingTypeInput struct {

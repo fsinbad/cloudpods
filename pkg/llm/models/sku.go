@@ -34,14 +34,16 @@ type SLLMSkuBaseManager struct {
 type SLLMSkuBase struct {
 	db.SSharableVirtualResourceBase
 
-	Bandwidth    int               `nullable:"false" default:"0" create:"optional" list:"user" update:"user"`
-	Cpu          int               `nullable:"false" default:"1" create:"optional" list:"user" update:"user"`
-	Memory       int               `nullable:"false" default:"512" create:"optional" list:"user" update:"user"`
-	Volumes      *api.Volumes      `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
-	HostPaths    *api.HostPaths    `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
-	PortMappings *api.PortMappings `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
-	Devices      *api.Devices      `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
-	Envs         *api.Envs         `charset:"utf8" nullable:"true" list:"user" update:"user" create:"optional"`
+	Bandwidth          int               `nullable:"false" default:"0" create:"optional" list:"user" update:"user"`
+	Cpu                int               `nullable:"false" default:"1" create:"optional" list:"user" update:"user"`
+	Memory             int               `nullable:"false" default:"512" create:"optional" list:"user" update:"user"`
+	EnableCgroupCpu    *bool             `default:"true" create:"optional" list:"user" update:"user"`
+	EnableCgroupMemory *bool             `default:"true" create:"optional" list:"user" update:"user"`
+	Volumes            *api.Volumes      `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
+	HostPaths          *api.HostPaths    `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
+	PortMappings       *api.PortMappings `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
+	Devices            *api.Devices      `charset:"utf8" length:"medium" nullable:"true" list:"user" update:"user" create:"optional"`
+	Envs               *api.Envs         `charset:"utf8" nullable:"true" list:"user" update:"user" create:"optional"`
 	// Properties
 	Properties map[string]string `charset:"utf8" nullable:"true" list:"user" update:"user" create:"optional"`
 }
@@ -84,7 +86,7 @@ func (man *SLLMSkuBaseManager) ValidateCreateData(ctx context.Context, userCred 
 	return input, nil
 }
 
-// normalizeLLMSkuDevices maps legacy NVIDIA_* / HYGON_* / ASCEND_* DevTypes onto
+// normalizeLLMSkuDevices maps NVIDIA_* / HYGON_* / ASCEND_* / ILUVATAR_* / THEAD_* / KUNLUNXIN_* DevTypes onto
 // GPU|NPU + SharingMode, and defaults empty DevType/SharingMode appropriately.
 func normalizeLLMSkuDevices(devices *api.Devices) error {
 	if devices == nil || len(*devices) == 0 {
@@ -158,6 +160,21 @@ func normalizeLLMSkuDevice(dev *api.Device) {
 		if dev.SharingMode == "" {
 			dev.SharingMode = computeapi.DEVICE_SHARING_MODE_HAMI
 		}
+	case computeapi.CONTAINER_DEV_ILUVATAR_GPU:
+		dev.DevType = computeapi.GPU_TYPE
+		if dev.SharingMode == "" {
+			dev.SharingMode = computeapi.DEVICE_SHARING_MODE_EXCLUSIVE
+		}
+	case computeapi.CONTAINER_DEV_THEAD_PPU:
+		dev.DevType = computeapi.GPU_TYPE
+		if dev.SharingMode == "" {
+			dev.SharingMode = computeapi.DEVICE_SHARING_MODE_EXCLUSIVE
+		}
+	case computeapi.CONTAINER_DEV_KUNLUNXIN_XPU:
+		dev.DevType = computeapi.GPU_TYPE
+		if dev.SharingMode == "" {
+			dev.SharingMode = computeapi.DEVICE_SHARING_MODE_EXCLUSIVE
+		}
 	}
 	if dev.SharingMode == "" {
 		dev.SharingMode = computeapi.DEVICE_SHARING_MODE_HAMI
@@ -171,6 +188,12 @@ func normalizeLLMSkuDevice(dev *api.Device) {
 			dev.Vendor = "NVIDIA"
 		case computeapi.CONTAINER_DEV_ASCEND_NPU, computeapi.CONTAINER_DEV_ASCEND_NPU_HAMI:
 			dev.Vendor = "ASCEND"
+		case computeapi.CONTAINER_DEV_ILUVATAR_GPU:
+			dev.Vendor = "ILUVATAR"
+		case computeapi.CONTAINER_DEV_THEAD_PPU:
+			dev.Vendor = "THEAD"
+		case computeapi.CONTAINER_DEV_KUNLUNXIN_XPU:
+			dev.Vendor = "KUNLUNXIN"
 		}
 	}
 	dev.Vendor = canonicalizeLLMDeviceVendor(dev.Vendor)

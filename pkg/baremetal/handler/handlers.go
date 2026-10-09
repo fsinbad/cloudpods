@@ -82,6 +82,7 @@ func initBaremetalsHandler(app *appsrv.Application) {
 	AddHandler(app, "POST", bmActionPrefix("ipmi-probe"), bmObjMiddleware(handleBaremetalIpmiProbe))
 	AddHandler(app, "POST", bmActionPrefix("cdrom"), bmObjMiddleware(handleBaremetalCdromTask))
 	AddHandler(app, "POST", bmActionPrefix("jnlp"), bmObjMiddleware(handleBaremetalJnlpTask))
+	AddHandler(app, "POST", bmActionPrefix("probe-isolated-devices"), bmObjMiddleware(handleBaremetalDetectIsolatedDevices))
 	AddHandler(app, "POST", "/baremetals/validate-ipmi", handleBaremetalValidateIPMI())
 
 	// server actions handler
@@ -245,7 +246,7 @@ func handleServerCreate(ctx *Context, bm *baremetal.SBaremetalInstance) {
 }
 
 func handleServerDelete(ctx *Context, bm *baremetal.SBaremetalInstance, _ baremetaltypes.IBaremetalServer) {
-	bm.StartServerDestroyTask(ctx.UserCred(), ctx.TaskId(), nil)
+	bm.StartServerDestroyTask(ctx.UserCred(), ctx.TaskId(), ctx.Data())
 	ctx.ResponseOk()
 }
 
@@ -300,4 +301,9 @@ func handleBaremetalRegister(ctx *Context, input *baremetal.BmRegisterInput) {
 		baremetal.GetBaremetalManager().RegisterBaremetal(ctx, ctx.userCred, input)
 		return nil, nil
 	}, nil)
+}
+
+func handleBaremetalDetectIsolatedDevices(ctx *Context, bm *baremetal.SBaremetalInstance) {
+	bm.StartDetectIsolatedDevices(ctx.UserCred(), ctx.TaskId(), ctx.Data())
+	ctx.ResponseOk()
 }

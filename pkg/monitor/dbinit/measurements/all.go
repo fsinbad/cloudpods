@@ -14,6 +14,12 @@
 
 package measurements
 
+import (
+	"fmt"
+
+	"yunion.io/x/onecloud/pkg/apis/monitor"
+)
+
 var All = []SMeasurement{
 	bond,
 	bondSlave,
@@ -32,6 +38,9 @@ var All = []SMeasurement{
 	vasmi,
 	npuSmi,
 	hysmi,
+	ixsmi,
+	ppusmi,
+	xpusmi,
 
 	worker,
 	serviceHttpCode,
@@ -122,4 +131,21 @@ var All = []SMeasurement{
 	temp,
 
 	hostRaid,
+}
+
+func newHostAgentMonitorContext(name string, displayName string) []SMonitorContext {
+	return []SMonitorContext{
+		{
+			Name:         name,
+			DisplayName:  displayName,
+			ResourceType: monitor.METRIC_RES_TYPE_HOST,
+			Database:     monitor.METRIC_DATABASE_TELE,
+		},
+		{
+			Name:         fmt.Sprintf("agent_%s", name),
+			DisplayName:  displayName,
+			ResourceType: monitor.METRIC_RES_TYPE_AGENT,
+			Database:     monitor.METRIC_DATABASE_TELE,
+		},
+	}
 }

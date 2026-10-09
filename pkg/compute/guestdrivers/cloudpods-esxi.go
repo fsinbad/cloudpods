@@ -26,7 +26,6 @@ import (
 	"yunion.io/x/jsonutils"
 	"yunion.io/x/log"
 	"yunion.io/x/pkg/errors"
-	"yunion.io/x/pkg/util/billing"
 	"yunion.io/x/pkg/util/httputils"
 	"yunion.io/x/pkg/util/rbacscope"
 	"yunion.io/x/pkg/utils"
@@ -319,8 +318,11 @@ func (self *SCloudpodsESXiGuestDriver) GetJsonDescAtHost(ctx context.Context, us
 			return nil, fmt.Errorf("unable to fetch disk %s", diskId)
 		}
 		storage, err := disk.GetStorage()
+		if err != nil {
+			return nil, errors.Wrap(err, "disk.GetStorage")
+		}
 		if storage == nil {
-			return nil, errors.Wrapf(err, "unable to fetch storage of disk %s", diskId)
+			return nil, errors.Wrapf(httperrors.ErrInvalidStatus, "unable to fetch storage of disk %s", diskId)
 		}
 		desc.Disks[i].StorageId = storage.GetExternalId()
 		desc.Disks[i].Preallocation = disk.Preallocation
@@ -569,10 +571,6 @@ func (self *SCloudpodsESXiGuestDriver) DoGuestCreateDisksTask(ctx context.Contex
 	}
 	subtask.ScheduleRun(nil)
 	return nil
-}
-
-func (self *SCloudpodsESXiGuestDriver) RequestRenewInstance(ctx context.Context, guest *models.SGuest, bc billing.SBillingCycle) (time.Time, error) {
-	return time.Time{}, nil
 }
 
 func (self *SCloudpodsESXiGuestDriver) IsSupportEip() bool {

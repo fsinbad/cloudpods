@@ -1251,7 +1251,7 @@ func (manager *SCloudproviderManager) ListItemFilter(
 	}
 
 	var zone *SZone
-	var region *SCloudregion
+	regionIds := make([]string, 0)
 
 	if len(query.ZoneId) > 0 {
 		zoneObj, err := validators.ValidateModel(ctx, userCred, ZoneManager, &query.ZoneId)
@@ -1259,10 +1259,11 @@ func (manager *SCloudproviderManager) ListItemFilter(
 			return nil, err
 		}
 		zone = zoneObj.(*SZone)
-		region, err = zone.GetRegion()
+		region, err := zone.GetRegion()
 		if err != nil {
 			return nil, err
 		}
+		regionIds = append(regionIds, region.Id)
 		vpcs := VpcManager.Query("manager_id").Equals("cloudregion_id", region.Id).Distinct()
 		if !utils.IsInStringArray(region.Provider, api.REGIONAL_NETWORK_PROVIDERS) {
 			wires := WireManager.Query().Equals("zone_id", query.ZoneId).SubQuery()
@@ -1276,17 +1277,21 @@ func (manager *SCloudproviderManager) ListItemFilter(
 			),
 		)
 	} else if len(query.CloudregionId) > 0 {
-		regionObj, err := CloudregionManager.FetchByIdOrName(ctx, userCred, query.CloudregionId)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				return nil, httperrors.NewResourceNotFoundError2("cloudregion", query.CloudregionId)
+		for _, regionId := range query.CloudregionId {
+			if len(regionId) == 0 {
+				continue
 			}
-			return nil, httperrors.NewGeneralError(err)
+			regionObj, err := ValidateCloudregionId(ctx, userCred, regionId)
+			if err != nil {
+				return nil, errors.Wrapf(err, "ValidateCloudregionId %s", regionId)
+			}
+			regionIds = append(regionIds, regionObj.GetId())
 		}
-		region = regionObj.(*SCloudregion)
-		pr := CloudproviderRegionManager.Query().SubQuery()
-		sq := pr.Query(pr.Field("cloudprovider_id")).Equals("cloudregion_id", region.Id).Distinct()
-		q = q.In("id", sq)
+		if len(regionIds) > 0 {
+			pr := CloudproviderRegionManager.Query().SubQuery()
+			sq := pr.Query(pr.Field("cloudprovider_id")).In("cloudregion_id", regionIds).Distinct()
+			q = q.In("id", sq)
+		}
 	}
 
 	if query.Usable != nil && *query.Usable {
@@ -1310,8 +1315,8 @@ func (manager *SCloudproviderManager) ListItemFilter(
 		if zone != nil {
 			zoneFilter := sqlchemy.OR(sqlchemy.Equals(wires.Field("zone_id"), zone.GetId()), sqlchemy.IsNullOrEmpty(wires.Field("zone_id")))
 			sq = sq.Filter(zoneFilter)
-		} else if region != nil {
-			sq = sq.Filter(sqlchemy.Equals(vpcs.Field("cloudregion_id"), region.GetId()))
+		} else if len(regionIds) > 0 {
+			sq = sq.Filter(sqlchemy.In(vpcs.Field("cloudregion_id"), regionIds))
 		}
 
 		q = q.Filter(sqlchemy.In(q.Field("id"), sq.SubQuery()))
@@ -1470,6 +1475,7 @@ func (provider *SCloudprovider) markProviderDisconnected(ctx context.Context, us
 	if err != nil {
 		return err
 	}
+	InvalidateNetworkUsableZoneIdsCache()
 	if provider.Status != api.CLOUD_PROVIDER_DISCONNECTED {
 		provider.SetStatus(ctx, userCred, api.CLOUD_PROVIDER_DISCONNECTED, reason)
 		return provider.ClearSchedDescCache()
@@ -1504,9 +1510,11 @@ func (provider *SCloudprovider) markProviderConnected(ctx context.Context, userC
 			return err
 		}
 		db.OpsLog.LogEvent(provider, db.ACT_UPDATE, diff, userCred)
+		InvalidateNetworkUsableZoneIdsCache()
 	}
 	if provider.Status != api.CLOUD_PROVIDER_CONNECTED {
 		provider.SetStatus(ctx, userCred, api.CLOUD_PROVIDER_CONNECTED, "")
+		InvalidateNetworkUsableZoneIdsCache()
 		return provider.ClearSchedDescCache()
 	}
 	return nil

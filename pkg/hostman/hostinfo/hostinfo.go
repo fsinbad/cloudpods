@@ -381,7 +381,7 @@ func (h *SHostInfo) parseConfig() error {
 	if mem < 64 { // MB
 		return fmt.Errorf("Not enough memory!")
 	}
-	if len(options.HostOptions.Networks) == 0 {
+	if len(options.HostOptions.Networks) == 0 && len(options.HostOptions.ListenInterface) == 0 {
 		netConf, err := h.generateLocalNetworkConfig()
 		if err != nil {
 			return errors.Wrap(err, "generateLocalNetworkConfig")
@@ -976,6 +976,10 @@ func (h *SHostInfo) detectSyssoftwareInfo() error {
 		if err := h.detectQemuVersion(); err != nil {
 			log.Errorf("detect qemu version: %s", err.Error())
 			h.AppendHostError(fmt.Sprintf("detect qemu version: %s", err.Error()))
+		}
+		h.sysinfo.QemuVersions = qemutils.GetUsrLocalQemuVersions()
+		if !utils.IsInStringArray(h.sysinfo.QemuVersion, h.sysinfo.QemuVersions) {
+			h.sysinfo.QemuVersions = append(h.sysinfo.QemuVersions, h.sysinfo.QemuVersion)
 		}
 	}
 	h.detectOvsVersion()
@@ -2362,6 +2366,9 @@ func (h *SHostInfo) probeSyncIsolatedDevices() (*jsonutils.JSONArray, error) {
 		EnableContainerAscendNpuHAMI: options.HostOptions.EnableContainerAscendNPUHami,
 		EnableContainerHygonDCU:      options.HostOptions.EnableContainerHygonDCU,
 		EnableContainerHygonDCUHAMI:  options.HostOptions.EnableContainerHygonDCUHami,
+		EnableContainerIluvatarGPU:   options.HostOptions.EnableContainerIluvatarGPU,
+		EnableContainerTHeadPPU:      options.HostOptions.EnableContainerTHeadPPU,
+		EnableContainerKunlunxinXPU:  options.HostOptions.EnableContainerKunlunxinXPU,
 		EnableWhitelist:              options.HostOptions.EnableIsolatedDeviceWhitelist,
 		SriovNics:                    sriovNics,
 		OvsOffloadNics:               offloadNics,
@@ -2682,6 +2689,22 @@ func (h *SHostInfo) OnCatalogChanged(catalog mcclient.KeystoneServiceCatalogV3) 
 	}*/
 }
 
+func resolveSmiBinPath(binPath string) string {
+	return resolveSmiBinPathWithReadlink(binPath, procutils.RemoteReadlink)
+}
+
+func resolveSmiBinPathWithReadlink(binPath string, readlink func(string) (string, error)) string {
+	if binPath == "" {
+		return binPath
+	}
+	resolved, err := readlink(binPath)
+	if err != nil || resolved == "" {
+		log.Warningf("failed to resolve smi binary path %q: %v", binPath, err)
+		return binPath
+	}
+	return resolved
+}
+
 func (h *SHostInfo) injectTelegrafDeviceConfig(conf map[string]interface{}) {
 	devs := h.GetIsolatedDeviceManager().GetDevices()
 	if len(devs) == 0 {
@@ -2691,12 +2714,24 @@ func (h *SHostInfo) injectTelegrafDeviceConfig(conf map[string]interface{}) {
 	hasNetint := false
 	hasVasmi := false
 	hasHygon := false
+	hasIluvatar := false
+	hasTHead := false
+	hasKunlunxin := false
 	hasNvidiasmi := false
 	hasNpusmi := false
 	for _, dev := range devs {
 		vendorId := strings.Split(dev.GetVendorDeviceId(), ":")[0]
 		if vendorId == api.HYGON_VENDOR_ID {
 			hasHygon = true
+		}
+		if vendorId == api.ILUVATAR_VENDOR_ID {
+			hasIluvatar = true
+		}
+		if vendorId == api.THEAD_VENDOR_ID {
+			hasTHead = true
+		}
+		if vendorId == api.KUNLUNXIN_VENDOR_ID {
+			hasKunlunxin = true
 		}
 		if !utils.IsInStringArray(dev.GetSharingMode(), api.VIRTUAL_SHARING_MODES) {
 			continue
@@ -2744,6 +2779,54 @@ func (h *SHostInfo) injectTelegrafDeviceConfig(conf map[string]interface{}) {
 			system_service.TELEGRAF_INPUT_CONF_BIN_PATH: options.HostOptions.HygonHySmiPath,
 		}
 	}
+	if hasIluvatar {
+		defaultCorexHome := "/usr/local/corex-4.4.0"
+		ixsmiPath := options.HostOptions.IluvatarIxsmiPath
+		if ixsmiPath == "" {
+			ixsmiPath = "/usr/local/bin/ixsmi"
+		}
+		resolvedPath := resolveSmiBinPath(ixsmiPath)
+		corexHome := defaultCorexHome
+		if resolvedPath != ixsmiPath {
+			corexHome = path.Dir(path.Dir(resolvedPath))
+		}
+		conf[system_service.TELEGRAF_INPUT_IXSMI] = map[string]interface{}{
+			system_service.TELEGRAF_INPUT_CONF_BIN_PATH: resolvedPath,
+			system_service.TELEGRAF_INPUT_CONF_LIB_PATH: path.Join(corexHome, "lib64"),
+		}
+	}
+	if hasTHead {
+		sdkHome := options.HostOptions.THeadPpuSdkHome
+		if sdkHome == "" {
+			sdkHome = "/usr/local/PPU_SDK"
+		}
+		libPath := path.Join(sdkHome, "lib64")
+		if !fileutils2.Exists(libPath) && fileutils2.Exists(path.Join(sdkHome, "lib")) {
+			libPath = path.Join(sdkHome, "lib")
+		}
+		smiPath := options.HostOptions.THeadPpuSmiPath
+		if smiPath == "" {
+			smiPath = "/usr/local/bin/ppu-smi"
+		}
+		conf[system_service.TELEGRAF_INPUT_PPUSMI] = map[string]interface{}{
+			system_service.TELEGRAF_INPUT_CONF_BIN_PATH: smiPath,
+			system_service.TELEGRAF_INPUT_CONF_LIB_PATH: libPath,
+		}
+	}
+	if hasKunlunxin {
+		xreHome := options.HostOptions.KunlunxinXreHome
+		if xreHome == "" {
+			xreHome = defaultKunlunxinXreHome
+		}
+		smiPath := options.HostOptions.KunlunxinXpuSmiPath
+		if smiPath == "" {
+			smiPath = defaultKunlunxinXpuSmiPath
+		}
+		conf[system_service.TELEGRAF_INPUT_XPUSMI] = map[string]interface{}{
+			system_service.TELEGRAF_INPUT_CONF_BIN_PATH: smiPath,
+			system_service.TELEGRAF_INPUT_CONF_LIB_PATH: resolveKunlunxinXpuLibDir(xreHome, fileutils2.Exists),
+		}
+	}
 	if hasNvidiasmi {
 		conf[system_service.TELEGRAF_INPUT_NVIDIASMI] = struct{}{}
 	}
@@ -2752,6 +2835,33 @@ func (h *SHostInfo) injectTelegrafDeviceConfig(conf map[string]interface{}) {
 			system_service.TELEGRAF_INPUT_CONF_BIN_PATH: "/usr/local/bin/npu-smi",
 		}
 	}
+}
+
+const (
+	defaultKunlunxinXreHome    = "/usr/local/xpu"
+	defaultKunlunxinXpuSmiPath = "/usr/local/bin/xpu-smi"
+)
+
+// resolveKunlunxinXpuLibDir returns the directory holding the Kunlunxin driver
+// libraries, mirroring container_device.kunlunxinXpuLibDir.
+func resolveKunlunxinXpuLibDir(xreHome string, exists func(string) bool) string {
+	if xreHome == "" {
+		xreHome = defaultKunlunxinXreHome
+	}
+	candidates := []string{
+		path.Join(xreHome, "so"),
+		path.Join(xreHome, "lib64"),
+		path.Join(xreHome, "lib"),
+	}
+	if exists == nil {
+		return candidates[0]
+	}
+	for _, candidate := range candidates {
+		if exists(candidate) {
+			return candidate
+		}
+	}
+	return candidates[0]
 }
 
 func (h *SHostInfo) getNicsTelegrafConf() []map[string]interface{} {

@@ -125,11 +125,11 @@ func (ai *SAnsiblePlaybookInstance) runPlaybook(ctx context.Context, userCred mc
 		ar = obj.(*SAnsiblePlaybookReference)
 	}
 	var (
-		privateKey string
-		err        error
+		privateKeys []string
+		err         error
 	)
-	if privateKey, err = compute.Sshkeypairs.FetchPrivateKey(ctx, userCred); err != nil {
-		return err
+	if privateKeys, err = compute.Sshkeypairs.FetchProjectPrivateKeys(ctx, userCred); err != nil {
+		return errors.Wrap(err, "unable to fetch private keys")
 	}
 	_, err = db.Update(ai, func() error {
 		ai.StartTime = time.Now()
@@ -143,15 +143,21 @@ func (ai *SAnsiblePlaybookInstance) runPlaybook(ctx context.Context, userCred mc
 	}
 
 	// merge configs
-	dp, params := ar.DefaultParams.(*jsonutils.JSONDict), ai.Params.(*jsonutils.JSONDict)
-	for _, k := range dp.SortedKeys() {
-		v, _ := dp.Get(k)
-		params.Set(k, v)
+	// the default params of the reference act as defaults, they are overridden
+	// by the params of this instance
+	params, _ := ai.Params.(*jsonutils.JSONDict)
+	if params == nil {
+		params = jsonutils.NewDict()
 	}
-	ar.DefaultParams.(*jsonutils.JSONDict).SortedKeys()
+	if dp, _ := ar.DefaultParams.(*jsonutils.JSONDict); dp != nil {
+		for _, k := range dp.SortedKeys() {
+			v, _ := dp.Get(k)
+			params.Set(k, v)
+		}
+	}
 	sess := ansiblev2.NewOfflineSession().
 		Inventory(ai.Inventory).
-		PrivateKey(privateKey).
+		PrivateKeys(privateKeys).
 		ConfigYaml(params.YAMLString()).
 		PlaybookPath(ar.PlaybookPath).
 		OutputWriter(&ansiblePlaybookOutputWriter{ai}).
